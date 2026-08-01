@@ -120,6 +120,17 @@ Postgres attached.
 
 4. Deploy. `railway.json` handles the build, start command, and health check.
 
+### If you get a 502 with healthy-looking logs
+
+Check the **target port on the custom domain** first: Settings → Networking →
+your domain → target port. Railway injects `PORT` (8080) and the app listens on
+it, but a domain attached with a different target port (80 is an easy mistake)
+returns `Application failed to respond` while the logs show the app up,
+connected, and serving. Nothing in the application output looks wrong, because
+nothing in the application *is* wrong.
+
+The log line `listening on [::]:8080` tells you the port to point the domain at.
+
 ### Two things that will bite you if you change the build config
 
 - **`NODE_ENV=production` makes `npm ci` skip devDependencies** — which is where
