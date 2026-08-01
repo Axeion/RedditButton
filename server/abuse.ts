@@ -6,8 +6,16 @@ import { query } from './db.ts';
 /**
  * How many proxy hops sit in front of us. Railway terminates TLS at its edge,
  * so exactly one.
+ *
+ * Set to 0 when the process is exposed directly with no proxy. With no proxy
+ * in front, X-Forwarded-For is entirely client-supplied, so honouring it lets
+ * anyone pick their own ip_hash and mint identities without limit. 0 ignores
+ * the header and uses the socket address.
+ *
+ * Note the parse: `|| 1` would silently turn a deliberate 0 back into 1.
  */
-const TRUSTED_HOPS = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '1', 10) || 1;
+const rawHops = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '1', 10);
+const TRUSTED_HOPS = Number.isFinite(rawHops) && rawHops >= 0 ? rawHops : 1;
 
 function normalizeIp(ip: string): string {
   const t = ip.trim();
@@ -33,7 +41,8 @@ export function clientIp(req: IncomingMessage): string {
   const raw = req.headers['x-forwarded-for'];
   const header = Array.isArray(raw) ? raw.join(',') : raw;
 
-  if (header) {
+  // No trusted proxy means the header is just something the client typed.
+  if (header && TRUSTED_HOPS > 0) {
     const parts = header.split(',').map((p) => p.trim()).filter(Boolean);
     if (parts.length > 0) {
       const idx = Math.max(0, parts.length - TRUSTED_HOPS);
