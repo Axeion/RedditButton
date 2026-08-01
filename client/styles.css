@@ -666,3 +666,87 @@ main {
     transition: none !important;
   }
 }
+
+/* --- moderation ----------------------------------------------------------- */
+
+.mod-tools {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: middle;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+/* Revealed on hover on a pointer device; always visible on touch, where there
+   is no hover and a hidden control is simply an unusable one. */
+.msg:hover .mod-tools,
+.msg:focus-within .mod-tools {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .mod-tools {
+    opacity: 1;
+  }
+}
+
+.mod-btn {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.mod-btn:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.mod-btn.is-on {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+}
+
+.mod-btn.is-danger {
+  background: #7a1414;
+  border-color: #7a1414;
+  color: #fff;
+}
+
+.mod-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: #fffdfd;
+}
+
+.mod-who {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--red);
+  margin-right: 4px;
+}
+
+.mod-out {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+#turnstile-host {
+  display: flex;
+  justify-content: center;
+  min-height: 70px;
+}

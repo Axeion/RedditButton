@@ -164,3 +164,33 @@ ${
 
   return shell('Deadman - the Graveyard', head, body);
 }
+
+/**
+ * Mod sign-in. Server-rendered and deliberately plain — it is a login form, it
+ * does not need the game's JavaScript, and keeping it separate means a bug in
+ * the game bundle can never lock moderators out.
+ */
+export function modLoginPage(error?: string, next = '/'): string {
+  const head = '<meta name="robots" content="noindex, nofollow">';
+  const body = `
+<a class="mark" href="/">DEADMAN</a>
+<div class="tag">Moderator sign-in</div>
+<h1>Sign in</h1>
+${error ? `<p class="sub" style="color:#E03131">${esc(error)}</p>` : '<p class="sub">Signed-in moderators get inline controls on the main page.</p>'}
+<form method="post" action="/mod/login" class="card" style="max-width:380px">
+  <input type="hidden" name="next" value="${esc(next)}">
+  <label style="display:block;margin-bottom:10px">
+    <div class="muted" style="margin-bottom:4px">Username</div>
+    <input name="username" autocomplete="username" required
+           style="width:100%;padding:10px 12px;border:1px solid #ECEDEF;border-radius:8px;font-size:15px">
+  </label>
+  <label style="display:block;margin-bottom:16px">
+    <div class="muted" style="margin-bottom:4px">Password</div>
+    <input name="password" type="password" autocomplete="current-password" required
+           style="width:100%;padding:10px 12px;border:1px solid #ECEDEF;border-radius:8px;font-size:15px">
+  </label>
+  <button class="cta" type="submit" style="border:none;cursor:pointer;width:100%">Sign in</button>
+</form>
+<p class="muted">Accounts are created by an admin. There is no self-signup.</p>`;
+  return shell('Deadman - moderator sign-in', head, body);
+}
