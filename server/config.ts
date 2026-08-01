@@ -38,11 +38,22 @@ function secret(name: string): string {
  * (no scheme) would silently break every link preview. Normalise rather than
  * demand it be typed perfectly into a dashboard.
  */
-function normalizeOrigin(raw: string | undefined): string {
+export function normalizeOrigin(raw: string | undefined): string {
   const v = (raw ?? '').trim().replace(/\/+$/, '');
   if (!v) return '';
-  if (/^https?:\/\//i.test(v)) return v;
-  return `https://${v}`;
+
+  const withScheme = /^https?:\/\//i.test(v) ? v : `https://${v}`;
+
+  // Scheme and host are case-insensitive per RFC 3986, so "Https://Deadman.lol"
+  // is technically valid — but link-preview scrapers are not all careful, and a
+  // card that fails to unfurl is the whole feature not working. Parsing also
+  // drops any path or query someone pasted in by mistake.
+  try {
+    const u = new URL(withScheme);
+    return `${u.protocol}//${u.host}`.toLowerCase();
+  } catch {
+    return withScheme.toLowerCase();
+  }
 }
 
 export type DedupeMode = 'hard' | 'soft' | 'off';

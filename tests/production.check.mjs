@@ -112,7 +112,11 @@ const opened = await new Promise((resolve) => {
 check('websocket upgrades over wss', opened, WSU);
 
 if (opened) {
-  ws.on('message', (d) => frames.push(JSON.parse(d.toString())));
+  ws.on('message', (d) => {
+    const f = JSON.parse(d.toString());
+    f._at = Date.now();
+    frames.push(f);
+  });
   await sleep(3500);
 
   const hello = frames.find((f) => f.type === 'hello');
@@ -121,9 +125,14 @@ if (opened) {
   const gauge = frames.find((f) => f.type === 'gauge');
 
   check('server sends hello', !!hello, hello ? `as ${hello.name ?? 'spectator'}` : '');
+  // Both values come from the server, so this is immune to local clock skew.
+  // Comparing hello.expiresAt against Date.now() would measure the viewer's
+  // wristwatch, which is the mistake ClockSync exists to correct for.
+  const leftOnServer = hello ? (hello.expiresAt - hello.serverTime) / 1000 : NaN;
   check('deadline broadcast, not a countdown',
-    !!hello && typeof hello.expiresAt === 'number' && hello.expiresAt > Date.now(),
-    hello ? `${((hello.expiresAt - Date.now()) / 1000).toFixed(1)}s left` : '');
+    !!hello && typeof hello.expiresAt === 'number' &&
+      leftOnServer > 0 && leftOnServer <= hello.roundSeconds + 1,
+    Number.isNaN(leftOnServer) ? '' : `${leftOnServer.toFixed(1)}s left (server clock)`);
   check('state frames arrive about once a second', state.length >= 2,
     `${state.length} in 3.5s`);
   check('watching count is live', state.length > 0 && state.at(-1).watching >= 1,
@@ -137,8 +146,11 @@ if (opened) {
   ws.send(JSON.stringify({ type: 'ping', t: t0 }));
   await sleep(1200);
   const pong = frames.find((f) => f.type === 'pong' && f.t === t0);
+  // Skew measured at arrival; sampling after a sleep would just add the sleep.
+  const rtt = pong ? pong._at - t0 : 0;
+  const skew = pong ? Math.round(pong.serverTime - (t0 + rtt / 2)) : 0;
   check('clock sync ping/pong works', !!pong,
-    pong ? `rtt ${Date.now() - t0}ms, skew ${Math.abs(pong.serverTime - Date.now())}ms` : '');
+    pong ? `rtt ${rtt}ms, your clock is ${skew > 0 ? 'behind' : 'ahead'} by ${Math.abs(skew)}ms` : '');
 
   // Oversized frame must be rejected even through the proxy.
   const closed = new Promise((r) => ws.on('close', (c) => r(c)));
@@ -164,7 +176,7 @@ const anyPress = grave.eras?.flatMap((e) => e.top ?? [])[0];
 if (anyPress) {
   const shareHtml = await (await fetch(`${BASE}/p/${anyPress.id}`)).text();
   const og = /<meta property="og:image" content="([^"]+)"/.exec(shareHtml)?.[1];
-  if (IS_HTTPS) check('share page has an absolute og:image', !!og && /^https:\/\//.test(og), og);
+  if (IS_HTTPS) check('share page has an absolute og:image', !!og && /^https:\/\//i.test(og), og);
   else skip('share page has an absolute og:image', `local run gave ${og}`);
 
   const cardRes = await fetch(`${BASE}/card/${anyPress.id}.png`);
