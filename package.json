@@ -17,11 +17,12 @@
     "build:assets": "mkdir -p dist/assets && cp -r assets/. dist/assets/",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && npm run test:bands && npm run test:origin && npm run test:protocol",
+    "test": "npm run typecheck && npm run test:bands && npm run test:origin && npm run test:network && npm run test:protocol",
     "test:bands": "tsx tests/bands.test.ts",
     "test:protocol": "node tests/protocol.test.mjs",
     "test:browser": "node tests/browser.test.mjs",
-    "test:origin": "tsx tests/origin.test.ts"
+    "test:origin": "tsx tests/origin.test.ts",
+    "test:network": "tsx tests/network.test.ts"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.65",

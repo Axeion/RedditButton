@@ -43,33 +43,41 @@ check('no x-powered-by header', !healthRes.headers.get('x-powered-by'));
 //      can pick their own identity by forging a header.
 // We can test #2 from a single network: forging XFF must not move the hash.
 
-const baseline = (await (await fetch(`${BASE}/healthz`)).json()).ipHashPrefix;
-const forged = (
-  await (
-    await fetch(`${BASE}/healthz`, { headers: { 'x-forwarded-for': '1.2.3.4' } })
-  ).json()
-).ipHashPrefix;
-const forgedChain = (
-  await (
-    await fetch(`${BASE}/healthz`, {
-      headers: { 'x-forwarded-for': '9.9.9.9, 8.8.8.8, 7.7.7.7' },
-    })
-  ).json()
-).ipHashPrefix;
+const UA = 'ProdCheck-XFF/1.0';
+const hashOf = async (headers = {}) =>
+  (await (await fetch(`${BASE}/healthz`, { headers: { 'user-agent': UA, ...headers } })).json())
+    .ipHashPrefix;
+
+// A dual-stack client alternates between IPv4 and IPv6 via Happy Eyeballs, so
+// the honest hash is not one value — it is a small set. Sample it first, then
+// check whether forging a header can produce anything OUTSIDE that set. A
+// single before/after comparison reads address rotation as a spoof.
+const natural = new Set();
+for (let i = 0; i < 6; i++) natural.add(await hashOf());
+
+const forgedSet = new Set();
+for (let i = 0; i < 6; i++) {
+  forgedSet.add(await hashOf({ 'x-forwarded-for': '203.0.113.7' }));
+  forgedSet.add(await hashOf({ 'x-forwarded-for': '9.9.9.9, 8.8.8.8, 7.7.7.7' }));
+}
+
+const escaped = [...forgedSet].filter((h) => !natural.has(h));
 
 if (IS_HTTPS) {
-  // Only meaningful behind a real proxy. Run directly against the process with
-  // no proxy in front and X-Forwarded-For is purely client-supplied, so of
-  // course it moves the hash — that is why TRUSTED_PROXY_HOPS=0 exists.
-  check('forged X-Forwarded-For cannot change your ip hash',
-    baseline === forged && baseline === forgedChain,
-    baseline === forged && baseline === forgedChain
-      ? `stable at ${baseline}`
-      : `SPOOFABLE: ${baseline} -> ${forged} / ${forgedChain}`);
+  check('forged X-Forwarded-For cannot change your ip hash', escaped.length === 0,
+    escaped.length === 0
+      ? `stable across ${natural.size} source address${natural.size === 1 ? '' : 'es'}: ${[...natural].join(', ')}`
+      : `SPOOFABLE — forging produced ${escaped.join(', ')}, outside natural set ${[...natural].join(', ')}`);
+  if (natural.size > 1) {
+    console.log(`      note: ${natural.size} source addresses seen for one client ` +
+      `(dual-stack IPv4/IPv6 is normal; each is a separate ip_hash bucket)`);
+  }
 } else {
   skip('forged X-Forwarded-For cannot change your ip hash',
     'no proxy in front of a local run; set TRUSTED_PROXY_HOPS=0 if exposing directly');
 }
+
+const baseline = [...natural][0];
 
 // A different user-agent must produce a different hash — proves the UA is
 // actually mixed in, which is what keeps households from colliding.

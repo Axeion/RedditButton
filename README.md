@@ -163,8 +163,12 @@ Cookie identity was a deliberate choice — players are meant to be ephemeral, n
 registered. That makes the attack obvious: clear cookies, press again. Layered
 defence, cheapest first:
 
-1. **IP hashing.** `sha256(ip + user-agent + IP_SALT)`, stored per user. Never a
-   raw address, so a database leak exposes nothing.
+1. **Network hashing.** `sha256(networkKey + user-agent + IP_SALT)`, stored per
+   user. Never a raw address, so a database leak exposes nothing. IPv6 is
+   bucketed by its **/64 prefix**, not the full address — privacy extensions
+   (RFC 4941) rotate the host half routinely, and hashing the whole address
+   would hand one device an endless supply of fresh identities. See
+   `tests/network.test.ts`.
 2. **One press per IP hash per era.** The control that actually stops farming — a
    fresh cookie doesn't help if the network already spent its press. Enforced by
    a unique index, so concurrent presses can't race past a check. Configurable
@@ -180,6 +184,12 @@ defence, cheapest first:
 6. **Audit + kill switch.** Every block is written to `abuse_events`;
    `banned_hashes` plus `/admin/ban` stops an attack in progress. Without the log
    you can't tell a quiet night from an attack.
+
+**Known gap: dual-stack.** A visitor reachable over both IPv4 and IPv6 has two
+network keys, so they can hold two identities and spend two presses per era.
+There is no way to link a subscriber's v4 and v6 addresses from the server, so
+this is inherent to network-based dedupe rather than something to patch. It
+costs one extra press per person, not unlimited ones.
 
 **Honest limit:** layers 1–5 make abuse expensive and slow, not impossible.
 Someone determined, with residential proxies, still gets through. Only real
