@@ -79,6 +79,37 @@ export async function tx<T>(fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Wait for Postgres to accept a connection.
+ *
+ * Railway wires services together over an IPv6-only private network that takes
+ * a moment to come up at container start, so the first connection attempt of a
+ * fresh deploy can lose a race it would win a second later. Retrying turns a
+ * hard boot failure into a short delay.
+ */
+export async function waitForDb(timeoutMs = 60_000): Promise<void> {
+  const started = Date.now();
+  let attempt = 0;
+
+  for (;;) {
+    try {
+      await pool.query('SELECT 1');
+      if (attempt > 0) {
+        console.log(`[db] connected after ${attempt + 1} attempts (${Date.now() - started}ms)`);
+      }
+      return;
+    } catch (err) {
+      attempt++;
+      if (Date.now() - started > timeoutMs) throw err;
+      const delay = Math.min(5000, 250 * 2 ** Math.min(attempt, 5));
+      console.warn(
+        `[db] not ready (attempt ${attempt}): ${(err as Error).message} — retrying in ${delay}ms`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 export async function migrate(): Promise<void> {
   await pool.query(SCHEMA_SQL);
 

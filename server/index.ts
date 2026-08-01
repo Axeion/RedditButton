@@ -2,7 +2,7 @@ import express from 'express';
 import http from 'node:http';
 import path from 'node:path';
 import { config, IS_PROD } from './config.ts';
-import { migrate } from './db.ts';
+import { migrate, waitForDb } from './db.ts';
 import { ipHash, shortHash, limiters, logAbuse, isBanned, refreshBans, banHash, unbanHash } from './abuse.ts';
 import { ensureIdentity } from './identity.ts';
 import * as game from './game.ts';
@@ -23,7 +23,25 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '16kb' }));
 
+/** Flipped once the database is migrated and the game is live. */
+let ready = false;
+let bootError: string | null = null;
+export function setReady(): void {
+  ready = true;
+  bootError = null;
+}
+
 app.get('/healthz', async (req, res) => {
+  // Answered even before the game is up, so a stuck boot is diagnosable from
+  // the outside instead of showing as a bare 502.
+  if (!ready) {
+    res.status(503).json({
+      ok: false,
+      status: 'starting',
+      detail: bootError ?? 'waiting for database',
+    });
+    return;
+  }
   try {
     await query('SELECT 1');
     res.json({
@@ -34,8 +52,8 @@ app.get('/healthz', async (req, res) => {
       // values mean `trust proxy` is wrong and the anti-abuse layer is inert.
       ipHashPrefix: shortHash(ipHash(req)),
     });
-  } catch {
-    res.status(503).json({ ok: false });
+  } catch (err) {
+    res.status(503).json({ ok: false, status: 'database unreachable', detail: String(err) });
   }
 });
 
@@ -50,6 +68,18 @@ app.use((req, res, next) => {
   if (!limiters.http.take(hash)) {
     logAbuse(hash, 'http_rate', req.path);
     res.status(429).json({ error: 'rate_limited' });
+    return;
+  }
+  next();
+});
+
+// Anything that touches the game or the database is unavailable until boot
+// finishes. Static assets still serve, so the page loads and its WebSocket
+// reconnect loop picks things up the moment the game is live.
+app.use((req, res, next) => {
+  if (ready) return next();
+  if (/^\/(api|card|p|graveyard|admin)\b/.test(req.path)) {
+    res.status(503).json({ error: 'starting', message: 'Warming up. Try again in a moment.' });
     return;
   }
   next();
@@ -194,16 +224,36 @@ if (IS_PROD) {
 
 const server = http.createServer(app);
 
+/**
+ * Bind the port BEFORE touching the database.
+ *
+ * If initialisation runs first and the database isn't reachable, the process
+ * exits without ever listening, and the platform reports a bare 502 with no
+ * indication of why. Listening first means /healthz can say what's actually
+ * wrong, and a slow database becomes a short delay rather than a crash loop.
+ */
 async function main(): Promise<void> {
+  server.listen(config.port, '0.0.0.0', () => {
+    console.log(
+      `[deadman] listening on 0.0.0.0:${config.port} (${IS_PROD ? 'production' : 'development'})`,
+    );
+  });
+
+  server.on('error', (err) => {
+    console.error('[deadman] server error', err);
+    process.exit(1);
+  });
+
+  console.log('[deadman] connecting to postgres…');
+  await waitForDb();
   await migrate();
   await refreshBans();
   await game.initGame();
   await chat.loadRecent(game.currentEra().id);
   attachHub(server);
 
-  server.listen(config.port, () => {
-    console.log(`[deadman] listening on :${config.port} (${IS_PROD ? 'production' : 'development'})`);
-  });
+  setReady();
+  console.log('[deadman] ready');
 }
 
 async function shutdown(signal: string): Promise<void> {
@@ -216,6 +266,9 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
 main().catch((err) => {
-  console.error('[deadman] failed to start', err);
-  process.exit(1);
+  bootError = String(err instanceof Error ? err.message : err);
+  console.error('[deadman] failed to start:', err);
+  // Stay up briefly so /healthz can report the reason to whoever is looking,
+  // then exit and let the platform restart us.
+  setTimeout(() => process.exit(1), 10_000);
 });
