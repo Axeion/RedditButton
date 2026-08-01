@@ -2,7 +2,9 @@ import './styles.css';
 import { ClockSync } from './clock.ts';
 import { sound } from './sound.ts';
 import { BANDS, bandById, bandFor, type BandId } from '@shared/bands.ts';
-import type { ServerMessage, ClientMessage, PressDTO, ChatDTO } from '@shared/protocol.ts';
+import type {
+  ServerMessage, ClientMessage, PressDTO, ChatDTO, ModInfo, ChatSettingsDTO,
+} from '@shared/protocol.ts';
 
 // --- DOM --------------------------------------------------------------------
 
@@ -53,6 +55,8 @@ const state = {
   expiresAt: 0,
   eraId: 0,
   roundSeconds: 90,
+  mod: null as ModInfo | null,
+  chatSettings: { slowModeSeconds: 0, locked: false } as ChatSettingsDTO,
   boardScope: 'era' as 'era' | 'all',
   boards: { era: [] as PressDTO[], all: [] as PressDTO[] },
   pressInFlight: false,
@@ -282,11 +286,22 @@ function nearBottom(): boolean {
   return els.chat.scrollHeight - els.chat.scrollTop - els.chat.clientHeight < 80;
 }
 
+function modButton(label: string, title: string, onClick: () => void): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = 'mod-btn';
+  b.type = 'button';
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
 function appendChat(m: ChatDTO): void {
   const stick = nearBottom();
 
   const div = document.createElement('div');
   div.className = 'msg';
+  div.dataset.id = String(m.id);
 
   const who = document.createElement('span');
   who.className = 'who';
@@ -297,10 +312,104 @@ function appendChat(m: ChatDTO): void {
   body.textContent = m.body;
 
   div.append(who, body);
+
+  // Controls are rendered only for signed-in mods, but that is cosmetic — the
+  // server re-authorises every action against the session cookie regardless.
+  if (state.mod) {
+    const tools = document.createElement('span');
+    tools.className = 'mod-tools';
+    tools.append(
+      modButton('del', `Delete this message from ${m.name}`, () =>
+        send({ type: 'modDelete', messageId: m.id })),
+      modButton('purge', `Delete everything ${m.name} said this era`, () => {
+        if (confirm(`Delete every message from ${m.name} this era?`)) {
+          send({ type: 'modPurge', messageId: m.id });
+        }
+      }),
+      modButton('5m', `Time ${m.name} out for 5 minutes`, () =>
+        send({ type: 'modTimeout', messageId: m.id, minutes: 5 })),
+      modButton('1h', `Time ${m.name} out for an hour`, () =>
+        send({ type: 'modTimeout', messageId: m.id, minutes: 60 })),
+    );
+    div.append(tools);
+  }
+
   els.chat.append(div);
 
   while (els.chat.childElementCount > 200) els.chat.firstElementChild?.remove();
   if (stick) els.chat.scrollTop = els.chat.scrollHeight;
+}
+
+function removeMessages(ids: number[]): void {
+  const wanted = new Set(ids.map(String));
+  for (const el of [...els.chat.children]) {
+    const id = (el as HTMLElement).dataset?.id;
+    if (id && wanted.has(id)) el.remove();
+  }
+}
+
+/** Mod-only toolbar above the chat input: slow mode and lockdown. */
+function renderModBar(): void {
+  let bar = document.getElementById('mod-bar');
+  if (!state.mod) {
+    bar?.remove();
+    return;
+  }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'mod-bar';
+    bar.className = 'mod-bar';
+    els.chatForm.before(bar);
+  }
+  bar.textContent = '';
+
+  const who = document.createElement('span');
+  who.className = 'mod-who';
+  who.textContent = `${state.mod.username} (${state.mod.role})`;
+  bar.append(who);
+
+  for (const secs of [0, 5, 15, 30]) {
+    const b = modButton(
+      secs === 0 ? 'slow off' : `${secs}s`,
+      secs === 0 ? 'Turn slow mode off' : `Slow mode: one message per ${secs}s`,
+      () => send({ type: 'modSlowMode', seconds: secs }),
+    );
+    if (state.chatSettings.slowModeSeconds === secs) b.classList.add('is-on');
+    bar.append(b);
+  }
+
+  const lock = modButton(
+    state.chatSettings.locked ? 'unlock' : 'lock',
+    state.chatSettings.locked ? 'Unlock chat' : 'Freeze chat entirely',
+    () => send({ type: 'modLock', locked: !state.chatSettings.locked }),
+  );
+  if (state.chatSettings.locked) lock.classList.add('is-danger');
+  bar.append(lock);
+
+  const out = document.createElement('a');
+  out.href = '#';
+  out.className = 'mod-out';
+  out.textContent = 'sign out';
+  out.addEventListener('click', (e) => {
+    e.preventDefault();
+    const f = document.createElement('form');
+    f.method = 'post';
+    f.action = '/mod/logout';
+    document.body.append(f);
+    f.submit();
+  });
+  bar.append(out);
+}
+
+function applyChatSettings(s: ChatSettingsDTO): void {
+  state.chatSettings = s;
+  els.chatInput.disabled = state.spectator || s.locked;
+  els.chatInput.placeholder = s.locked
+    ? 'Chat is locked by a moderator.'
+    : s.slowModeSeconds > 0
+      ? `Slow mode: one message per ${s.slowModeSeconds}s`
+      : 'Say something…';
+  renderModBar();
 }
 
 function systemLine(text: string): void {
@@ -404,8 +513,9 @@ function handle(msg: ServerMessage): void {
       state.expiresAt = msg.expiresAt;
       state.eraId = msg.eraId;
       state.roundSeconds = msg.roundSeconds;
+      state.mod = msg.mod;
       clock.sample(Date.now(), msg.serverTime);
-      els.chatInput.disabled = msg.spectator;
+      applyChatSettings(msg.chatSettings);
       renderPressButton();
       renderYou();
       break;
@@ -447,6 +557,22 @@ function handle(msg: ServerMessage): void {
 
     case 'chat':
       appendChat(msg.message);
+      break;
+
+    case 'chatDelete':
+      removeMessages(msg.ids);
+      break;
+
+    case 'chatSettings':
+      applyChatSettings(msg.settings);
+      if (msg.settings.locked) systemLine('A moderator locked the chat.');
+      else if (msg.settings.slowModeSeconds > 0) {
+        systemLine(`Slow mode on: one message per ${msg.settings.slowModeSeconds}s.`);
+      }
+      break;
+
+    case 'modResult':
+      toast(msg.message, msg.ok ? 2600 : 4000);
       break;
 
     case 'chatBackfill':
@@ -551,9 +677,91 @@ function connect(): void {
  * Identity is minted over HTTP before the socket opens, because an upgrade
  * request can read cookies but cannot set one.
  */
+/**
+ * Render a Turnstile challenge and resolve with its token.
+ *
+ * Only ever reached when the server refuses to mint a new identity without
+ * one. A returning player with a valid cookie never sees this, and the press
+ * itself is never gated — a widget appearing with three seconds on the clock
+ * would be the end of the game.
+ */
+function solveTurnstile(siteKey: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    els.modalBody.textContent = '';
+
+    const h3 = document.createElement('h3');
+    h3.textContent = 'One quick check';
+    const sub = document.createElement('div');
+    sub.className = 'muted';
+    sub.textContent = 'Confirming you are a person, not a script farming presses.';
+    const host = document.createElement('div');
+    host.id = 'turnstile-host';
+    host.style.margin = '18px auto';
+
+    els.modalBody.append(h3, sub, host);
+    els.modal.hidden = false;
+
+    let settled = false;
+    const done = (token: string | null) => {
+      if (settled) return;
+      settled = true;
+      els.modal.hidden = true;
+      resolve(token);
+    };
+
+    const render = () => {
+      const ts = (window as unknown as { turnstile?: {
+        render: (el: HTMLElement, o: Record<string, unknown>) => void;
+      } }).turnstile;
+      if (!ts) return done(null);
+      ts.render(host, {
+        sitekey: siteKey,
+        callback: (token: string) => done(token),
+        'error-callback': () => done(null),
+        'timeout-callback': () => done(null),
+      });
+    };
+
+    if ((window as unknown as { turnstile?: unknown }).turnstile) {
+      render();
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    script.async = true;
+    script.onload = render;
+    // If Cloudflare's script itself can't load, don't strand the visitor at a
+    // blank modal — fall through and let the server decide.
+    script.onerror = () => done(null);
+    document.head.append(script);
+
+    window.setTimeout(() => done(null), 20_000);
+  });
+}
+
+async function fetchIdentity(turnstileToken?: string): Promise<Response> {
+  const url = turnstileToken
+    ? `/api/identity?turnstile=${encodeURIComponent(turnstileToken)}`
+    : '/api/identity';
+  return fetch(url, { credentials: 'same-origin' });
+}
+
 async function boot(): Promise<void> {
   try {
-    const res = await fetch('/api/identity', { credentials: 'same-origin' });
+    let res = await fetchIdentity();
+
+    if (res.status === 403) {
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        message?: string;
+        siteKey?: string;
+      };
+      if (body.error === 'turnstile' && body.siteKey) {
+        const token = await solveTurnstile(body.siteKey);
+        if (token) res = await fetchIdentity(token);
+      }
+    }
+
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as { message?: string };
       if (body.message) toast(body.message, 7000);

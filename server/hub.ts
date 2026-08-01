@@ -12,6 +12,15 @@ import {
   shortHash,
 } from './abuse.ts';
 import { identityFromRequest, type User } from './identity.ts';
+import {
+  modFromRequest,
+  audit,
+  timeoutUser,
+  chatSettings,
+  setSlowMode,
+  setLocked,
+  type Mod,
+} from './moderation.ts';
 import * as game from './game.ts';
 import * as chat from './chat.ts';
 import { MAX_CHAT_LENGTH, MAX_WS_FRAME_BYTES } from '@shared/protocol.ts';
@@ -22,6 +31,8 @@ interface Conn {
   ws: WebSocket;
   /** Null for spectators: they receive everything, but cannot press or chat. */
   user: User | null;
+  /** Resolved from the session cookie at connect. Never from client claims. */
+  mod: Mod | null;
   hash: string;
   hasPressed: boolean;
   band: BandId | null;
@@ -31,10 +42,21 @@ interface Conn {
 
 const conns = new Set<Conn>();
 
+type ClientMsg = z.infer<typeof ClientMessageSchema>;
+
 const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('press') }),
   z.object({ type: z.literal('chat'), body: z.string().max(MAX_CHAT_LENGTH * 2) }),
   z.object({ type: z.literal('ping'), t: z.number() }),
+  z.object({ type: z.literal('modDelete'), messageId: z.number().int().positive() }),
+  z.object({ type: z.literal('modPurge'), messageId: z.number().int().positive() }),
+  z.object({
+    type: z.literal('modTimeout'),
+    messageId: z.number().int().positive(),
+    minutes: z.number().int().min(1).max(10080),
+  }),
+  z.object({ type: z.literal('modSlowMode'), seconds: z.number().int().min(0).max(300) }),
+  z.object({ type: z.literal('modLock'), locked: z.boolean() }),
 ]);
 
 function send(c: Conn, msg: ServerMessage): void {
@@ -137,6 +159,120 @@ async function handleChat(c: Conn, body: string): Promise<void> {
   broadcast({ type: 'chat', message: result.message });
 }
 
+// ---------------------------------------------------------------------------
+// Moderation
+// ---------------------------------------------------------------------------
+
+function settingsDTO() {
+  const s = chatSettings();
+  return { slowModeSeconds: Math.round(s.slowModeMs / 1000), locked: s.locked };
+}
+
+/**
+ * Every mod action re-checks c.mod, which was resolved from the session cookie
+ * at connect time. A client claiming to be a moderator proves nothing, and the
+ * UI being hidden is not a permission check.
+ */
+async function handleMod(c: Conn, msg: Extract<ClientMsg, { type: `mod${string}` }>): Promise<void> {
+  if (!c.mod) {
+    logAbuse(c.hash, 'mod_forbidden', msg.type);
+    send(c, { type: 'error', code: 'forbidden', message: 'Not a moderator.' });
+    return;
+  }
+  const mod = c.mod;
+  const eraId = game.currentEra().id;
+
+  switch (msg.type) {
+    case 'modDelete': {
+      const removed = await chat.deleteMessage(msg.messageId, mod.username);
+      if (!removed) {
+        send(c, { type: 'modResult', ok: false, message: 'Already gone.' });
+        return;
+      }
+      await audit(mod, 'delete_message', { targetMsg: msg.messageId, targetName: removed.name });
+      broadcast({ type: 'chatDelete', ids: [msg.messageId], by: mod.username });
+      send(c, { type: 'modResult', ok: true, message: `Deleted a message from ${removed.name}.` });
+      return;
+    }
+
+    case 'modPurge': {
+      const author = await chat.messageAuthor(msg.messageId);
+      if (!author) {
+        send(c, { type: 'modResult', ok: false, message: 'No such message.' });
+        return;
+      }
+      const { ids } = await chat.purgeUser(author.userId, eraId, mod.username);
+      await audit(mod, 'purge_user', {
+        targetUser: author.userId,
+        targetName: author.name,
+        detail: `${ids.length} messages`,
+      });
+      if (ids.length) broadcast({ type: 'chatDelete', ids, by: mod.username });
+      send(c, {
+        type: 'modResult',
+        ok: true,
+        message: `Purged ${ids.length} message${ids.length === 1 ? '' : 's'} from ${author.name}.`,
+      });
+      return;
+    }
+
+    case 'modTimeout': {
+      const author = await chat.messageAuthor(msg.messageId);
+      if (!author) {
+        send(c, { type: 'modResult', ok: false, message: 'No such message.' });
+        return;
+      }
+      await timeoutUser(mod, author.userId, msg.minutes);
+      await audit(mod, 'timeout', {
+        targetUser: author.userId,
+        targetName: author.name,
+        detail: `${msg.minutes}m`,
+      });
+      // Tell them why they've gone quiet, rather than letting them shout into
+      // a void and assume the site is broken.
+      for (const other of conns) {
+        if (other.user?.id === author.userId) {
+          send(other, {
+            type: 'error',
+            code: 'timed_out',
+            message: `You've been timed out for ${msg.minutes} minute${msg.minutes === 1 ? '' : 's'}.`,
+          });
+        }
+      }
+      send(c, {
+        type: 'modResult',
+        ok: true,
+        message: `${author.name} timed out for ${msg.minutes}m.`,
+      });
+      return;
+    }
+
+    case 'modSlowMode': {
+      await setSlowMode(msg.seconds);
+      await audit(mod, 'slowmode', { detail: `${msg.seconds}s` });
+      broadcast({ type: 'chatSettings', settings: settingsDTO() });
+      send(c, {
+        type: 'modResult',
+        ok: true,
+        message: msg.seconds > 0 ? `Slow mode: ${msg.seconds}s.` : 'Slow mode off.',
+      });
+      return;
+    }
+
+    case 'modLock': {
+      await setLocked(msg.locked);
+      await audit(mod, 'lockdown', { detail: msg.locked ? 'locked' : 'unlocked' });
+      broadcast({ type: 'chatSettings', settings: settingsDTO() });
+      send(c, {
+        type: 'modResult',
+        ok: true,
+        message: msg.locked ? 'Chat locked.' : 'Chat unlocked.',
+      });
+      return;
+    }
+  }
+}
+
 export function attachHub(server: Server): void {
   const wss = new WebSocketServer({
     server,
@@ -178,6 +314,7 @@ export function attachHub(server: Server): void {
     // than being turned away — watching is the half of this game that isn't
     // gated on having a press to spend.
     const user = await identityFromRequest(req);
+    const mod = await modFromRequest(req);
 
     const era = game.currentEra();
     const mine = user ? await game.myPress(era.id, user.id) : null;
@@ -185,6 +322,7 @@ export function attachHub(server: Server): void {
     const c: Conn = {
       ws,
       user,
+      mod,
       hash,
       hasPressed: mine !== null,
       band: mine?.band ?? null,
@@ -209,6 +347,8 @@ export function attachHub(server: Server): void {
       eraId: era.id,
       eraStartedAt: era.startedAt,
       roundSeconds: config.roundSeconds,
+      mod: mod ? { username: mod.username, role: mod.role } : null,
+      chatSettings: settingsDTO(),
     });
     send(c, { type: 'chatBackfill', messages: chat.backfill() });
     void pushLeaderboards(c);
@@ -244,6 +384,9 @@ export function attachHub(server: Server): void {
           break;
         case 'chat':
           void handleChat(c, msg.data.body);
+          break;
+        default:
+          void handleMod(c, msg.data);
           break;
       }
     });

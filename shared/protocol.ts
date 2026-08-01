@@ -37,6 +37,16 @@ export interface EraSummary {
   lastHand: PressDTO | null;
 }
 
+export interface ModInfo {
+  username: string;
+  role: 'mod' | 'admin';
+}
+
+export interface ChatSettingsDTO {
+  slowModeSeconds: number;
+  locked: boolean;
+}
+
 export interface GaugeCounts {
   counts: Record<BandId, number>;
   total: number;
@@ -57,6 +67,9 @@ export type ServerMessage =
       eraId: number;
       eraStartedAt: number;
       roundSeconds: number;
+      /** Set when this connection is authenticated as a moderator. */
+      mod: ModInfo | null;
+      chatSettings: ChatSettingsDTO;
     }
   | { type: 'pong'; t: number; serverTime: number }
   | { type: 'state'; serverTime: number; expiresAt: number; eraId: number; watching: number; loaded: number }
@@ -67,13 +80,23 @@ export type ServerMessage =
   | { type: 'gauge'; gauge: GaugeCounts }
   | { type: 'closeCalls'; presses: PressDTO[] }
   | { type: 'flatline'; deadEra: EraSummary; eraId: number; expiresAt: number; eraStartedAt: number }
+  | { type: 'chatDelete'; ids: number[]; by: string }
+  | { type: 'chatSettings'; settings: ChatSettingsDTO }
+  | { type: 'modResult'; ok: boolean; message: string }
   | { type: 'error'; code: string; message: string };
 
 /** Client -> server. */
 export type ClientMessage =
   | { type: 'press' }
   | { type: 'chat'; body: string }
-  | { type: 'ping'; t: number };
+  | { type: 'ping'; t: number }
+  // Moderation. Every one of these is re-authorised server-side against the
+  // session cookie — the client saying it is a mod means nothing.
+  | { type: 'modDelete'; messageId: number }
+  | { type: 'modPurge'; messageId: number }
+  | { type: 'modTimeout'; messageId: number; minutes: number }
+  | { type: 'modSlowMode'; seconds: number }
+  | { type: 'modLock'; locked: boolean };
 
 export const MAX_CHAT_LENGTH = 300;
 /** Anything larger is a probe, not a player. */

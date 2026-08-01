@@ -58,6 +58,67 @@ CREATE TABLE IF NOT EXISTS banned_hashes (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Moderation ---------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS mods (
+  id            serial PRIMARY KEY,
+  username      text NOT NULL UNIQUE,
+  -- scrypt, encoded as scrypt$N$r$p$salt$hash. No bcrypt dependency needed;
+  -- Node ships scrypt in core.
+  password_hash text NOT NULL,
+  role          text NOT NULL DEFAULT 'mod',
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  last_seen_at  timestamptz,
+  disabled_at   timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS mod_sessions (
+  -- sha256 of the cookie token: a database leak must not hand over live
+  -- sessions.
+  token_hash text PRIMARY KEY,
+  mod_id     integer NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL
+);
+
+-- Why named accounts instead of one shared password: this table is worthless
+-- if every action is attributed to "the mod password".
+CREATE TABLE IF NOT EXISTS mod_actions (
+  id           bigserial PRIMARY KEY,
+  mod_id       integer REFERENCES mods(id) ON DELETE SET NULL,
+  mod_name     text NOT NULL,
+  action       text NOT NULL,
+  target_user  uuid,
+  target_name  text,
+  target_msg   bigint,
+  detail       text,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS timeouts (
+  user_id    uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  until      timestamptz NOT NULL,
+  reason     text,
+  by_mod     text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Small key/value bag for chat settings so slow mode and lockdown survive a
+-- restart instead of quietly switching themselves off mid-raid.
+CREATE TABLE IF NOT EXISTS settings (
+  key        text PRIMARY KEY,
+  value      text NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_by text;
+
+CREATE INDEX IF NOT EXISTS mod_sessions_expiry_idx ON mod_sessions (expires_at);
+CREATE INDEX IF NOT EXISTS mod_actions_recent_idx  ON mod_actions (created_at DESC);
+CREATE INDEX IF NOT EXISTS timeouts_until_idx      ON timeouts (until);
+CREATE INDEX IF NOT EXISTS messages_live_idx       ON messages (era_id, id DESC) WHERE deleted_at IS NULL;
+
 CREATE INDEX IF NOT EXISTS presses_era_rank_idx ON presses (era_id, seconds_left);
 CREATE INDEX IF NOT EXISTS presses_alltime_idx  ON presses (seconds_left);
 CREATE INDEX IF NOT EXISTS presses_era_band_idx ON presses (era_id, band);

@@ -3,13 +3,19 @@ import http from 'node:http';
 import path from 'node:path';
 import { config, IS_PROD } from './config.ts';
 import { migrate, waitForDb } from './db.ts';
-import { ipHash, shortHash, limiters, logAbuse, isBanned, refreshBans, banHash, unbanHash } from './abuse.ts';
-import { ensureIdentity } from './identity.ts';
+import {
+  ipHash, shortHash, limiters, logAbuse, isBanned, refreshBans, banHash, unbanHash,
+  RateLimiter,
+} from './abuse.ts';
+import { ensureIdentity, readCookieUserId } from './identity.ts';
 import * as game from './game.ts';
 import * as chat from './chat.ts';
 import { attachHub, connectionCount } from './hub.ts';
 import { renderCard } from './card.ts';
-import { sharePage, graveyardPage } from './pages.ts';
+import { sharePage, graveyardPage, modLoginPage } from './pages.ts';
+import * as mods from './moderation.ts';
+import { verifyTurnstile, turnstileEnabled, siteKey } from './turnstile.ts';
+import { clientIp } from './abuse.ts';
 import { query } from './db.ts';
 
 const app = express();
@@ -22,6 +28,7 @@ const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '16kb' }));
+app.use(express.urlencoded({ extended: false, limit: '16kb' }));
 
 /** Flipped once the database is migrated and the game is live. */
 let ready = false;
@@ -78,7 +85,7 @@ app.use((req, res, next) => {
 // reconnect loop picks things up the moment the game is live.
 app.use((req, res, next) => {
   if (ready) return next();
-  if (/^\/(api|card|p|graveyard|admin)\b/.test(req.path)) {
+  if (/^\/(api|card|p|graveyard|admin|mod)\b/.test(req.path)) {
     res.status(503).json({ error: 'starting', message: 'Warming up. Try again in a moment.' });
     return;
   }
@@ -92,12 +99,42 @@ app.use((req, res, next) => {
  * Vite dev proxy and in production.
  */
 app.get('/api/identity', async (req, res) => {
+  // Turnstile only matters when we're about to MINT. A returning player with a
+  // valid cookie must never be challenged — they already proved themselves, and
+  // re-challenging on every page load would be pure friction.
+  if (turnstileEnabled() && !readCookieUserId(req)) {
+    const token = (req.query.turnstile as string | undefined) ?? undefined;
+    const verdict = await verifyTurnstile(token, clientIp(req));
+    if (!verdict.ok) {
+      if (verdict.failOpen) {
+        // Cloudflare is down or misconfigured on our side. Log loudly and let
+        // the visitor in rather than closing signups during someone else's
+        // outage.
+        logAbuse(ipHash(req), 'turnstile_failopen', verdict.reason);
+        console.warn('[turnstile] failing open:', verdict.reason);
+      } else {
+        logAbuse(ipHash(req), 'turnstile_rejected', verdict.reason);
+        res.status(403).json({
+          error: 'turnstile',
+          message: 'Could not verify you are human. Reload and try again.',
+          siteKey: siteKey(),
+        });
+        return;
+      }
+    }
+  }
+
   const result = await ensureIdentity(req, res);
   if (!result.ok) {
     res.status(result.code === 'banned' ? 403 : 429).json({ error: result.code, message: result.message });
     return;
   }
   res.json({ id: result.user.id, name: result.user.name, minted: result.minted });
+});
+
+/** Lets the client know whether it needs to render a Turnstile widget at all. */
+app.get('/api/config', (_req, res) => {
+  res.json({ turnstile: turnstileEnabled() ? siteKey() : null });
 });
 
 app.get('/api/graveyard', async (_req, res) => {
@@ -159,6 +196,69 @@ app.get('/graveyard', async (req, res) => {
   res.send(graveyardPage(eras, longest, originOf(req)));
 });
 
+// --- Moderator sign-in ------------------------------------------------------
+
+// A mod account can delete anything in the room, so the login endpoint gets a
+// much tighter budget than ordinary traffic: 10 attempts per 15 minutes.
+const loginLimiter = new RateLimiter(10, 10 / 900_000, 'mod-login');
+
+app.get('/mod', async (req, res) => {
+  const mod = await mods.modFromRequest(req);
+  if (mod) {
+    res.redirect('/');
+    return;
+  }
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(modLoginPage());
+});
+
+app.post('/mod/login', async (req, res) => {
+  const hash = ipHash(req);
+  if (!loginLimiter.take(hash)) {
+    logAbuse(hash, 'mod_login_rate');
+    res.status(429).setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(modLoginPage('Too many attempts. Wait a few minutes.'));
+    return;
+  }
+
+  const { username, password } = req.body as { username?: string; password?: string };
+  if (!username || !password) {
+    res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(modLoginPage('Username and password required.'));
+    return;
+  }
+
+  const mod = await mods.login(username, password, res);
+  if (!mod) {
+    logAbuse(hash, 'mod_login_failed', username.slice(0, 32));
+    res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(modLoginPage('Wrong username or password.'));
+    return;
+  }
+
+  await mods.audit(mod, 'login');
+  res.redirect('/');
+});
+
+app.post('/mod/logout', async (req, res) => {
+  await mods.logout(req, res);
+  res.redirect('/');
+});
+
+app.get('/api/mod/me', async (req, res) => {
+  const mod = await mods.modFromRequest(req);
+  res.json(mod ? { username: mod.username, role: mod.role } : null);
+});
+
+app.get('/api/mod/actions', async (req, res) => {
+  const mod = await mods.modFromRequest(req);
+  if (!mod) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  res.json(await mods.recentActions(100));
+});
+
 // --- Admin ------------------------------------------------------------------
 
 function requireAdmin(req: express.Request, res: express.Response): boolean {
@@ -186,6 +286,41 @@ app.get('/admin/abuse', async (req, res) => {
      GROUP BY kind ORDER BY n DESC`,
   );
   res.json({ recent: rows, last24h: summary });
+});
+
+app.get('/admin/mods', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.json(await mods.listMods());
+});
+
+/** No self-signup anywhere: mod accounts exist only if an admin makes one. */
+app.post('/admin/mods', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const { username, password, role } = req.body as {
+    username?: string;
+    password?: string;
+    role?: string;
+  };
+  if (!username || !password) {
+    res.status(400).json({ error: 'username and password required' });
+    return;
+  }
+  try {
+    const mod = await mods.createMod(
+      username,
+      password,
+      role === 'admin' ? 'admin' : 'mod',
+    );
+    res.json({ ok: true, mod: { username: mod.username, role: mod.role } });
+  } catch (err) {
+    res.status(400).json({ error: String(err instanceof Error ? err.message : err) });
+  }
+});
+
+app.delete('/admin/mods/:username', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  await mods.disableMod(req.params.username ?? '');
+  res.json({ ok: true });
 });
 
 app.post('/admin/ban', async (req, res) => {
@@ -284,7 +419,10 @@ async function main(): Promise<void> {
   await refreshBans();
   await game.initGame();
   await chat.loadRecent(game.currentEra().id);
+  await mods.loadSettings();
   attachHub(server);
+
+  setInterval(() => void mods.sweepSessions(), 3600_000).unref();
 
   setReady();
   console.log('[deadman] ready');

@@ -199,6 +199,85 @@ creation* — not presses, since gating the press itself would ruin the moment.
 
 ---
 
+## Moderation
+
+Sign in at `/mod`. Controls then appear inline on the main page — no separate
+dashboard, because moderating is something you do while reading the room, not
+in another tab.
+
+**Automatic filter.** Rejects with a visible reason rather than shadow-dropping:
+a false positive that silently censors a real person is the worst failure here,
+and at least a rejection tells them to rephrase. It catches slurs and threats
+through obfuscation (`n1gg3r`, `f a g`, `f.a.g.g.o.t`, diacritics, zalgo), plus
+links, shouting, floods, and keyboard mashing.
+
+It is **not** a profanity filter. "damn" and "shit" go straight through — a chat
+where you can't swear while a shared clock hits three seconds isn't the chat
+anyone wanted. Tune it per-deployment with `CHAT_BLOCKLIST` / `CHAT_ALLOWLIST`
+without touching code.
+
+The false-positive tests in `tests/filter.test.ts` matter more than the true
+positives: "Scunthorpe", "classic", "assassin", "analysis" and "therapist" must
+all survive, and there's a regression test for each.
+
+**Mod powers**, all inline on each message:
+
+| Control | Effect |
+|---|---|
+| `del` | Removes one message for everyone, live |
+| `purge` | Removes everything that user said this era |
+| `5m` / `1h` | Times the user out; they're told why |
+| `slow off / 5s / 15s / 30s` | Global chat cooldown |
+| `lock` | Freezes chat entirely |
+
+Deletes are **soft** — the row survives with `deleted_by`, so the audit trail
+still points at something real.
+
+**Named accounts, not a shared password.** Every action is written to
+`mod_actions` against the moderator who took it. A shared password makes that
+table worthless the first time two mods disagree about a deletion. Passwords are
+scrypt-hashed (Node core — no native bcrypt build to fail on a deploy host) and
+must be 12+ characters. Sessions are 7-day cookies storing only a hash, so a
+database leak doesn't hand over live sessions. Disabling a mod kills their
+sessions immediately.
+
+There is **no self-signup**. Accounts exist only if an admin creates one:
+
+```bash
+curl -X POST https://deadman.lol/admin/mods \
+  -H "x-admin-token: $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"username":"you","password":"a-long-passphrase","role":"admin"}'
+```
+
+**The client being a mod means nothing.** Hidden UI is not a permission check —
+every mod action is re-authorised server-side against the session cookie, and
+`tests/moderation.test.mjs` asserts that a player sending `modDelete` directly
+over the WebSocket gets `forbidden` and the message survives.
+
+---
+
+## Cloudflare Turnstile (optional)
+
+Set `TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY` to turn it on; it's inert
+without both.
+
+It gates **identity creation only, never the press.** Gating the press would
+destroy the game — you're diving for gold with three seconds left and a widget
+appears. Identity is minted once, before you've seen the button, so the check is
+invisible. Returning players with a valid cookie are never challenged.
+
+This is what closes the gap IP hashing cannot: an attacker rotating residential
+proxies really does arrive from a different network each time, so no
+address-based control can separate them from real people. The automation itself
+is what's detectable.
+
+**It fails open.** If Cloudflare is unreachable, or the keys are misconfigured,
+new players are let in and the event is logged to `abuse_events`. Losing every
+signup for the duration of someone else's outage is worse than a few farmed
+presses — and a sustained failure shows up in the log rather than silently.
+
+---
+
 ## How it's built
 
 ```
