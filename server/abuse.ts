@@ -18,10 +18,40 @@ const rawHops = Number.parseInt(process.env.TRUSTED_PROXY_HOPS ?? '1', 10);
 const TRUSTED_HOPS = Number.isFinite(rawHops) && rawHops >= 0 ? rawHops : 1;
 
 function normalizeIp(ip: string): string {
-  const t = ip.trim();
+  // Drop any zone index (fe80::1%eth0).
+  const t = ip.trim().split('%')[0] ?? '';
   // ::ffff:1.2.3.4 is an IPv4 address wearing an IPv6 costume.
   const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(t);
   return (m?.[1] ?? t).toLowerCase();
+}
+
+/**
+ * Collapse an address to the network that identifies a subscriber.
+ *
+ * IPv4 is used whole. IPv6 is truncated to its /64 prefix, and that matters:
+ * privacy extensions (RFC 4941) rotate the host half of an IPv6 address
+ * routinely, so hashing the full address hands one device an endless supply of
+ * fresh ip_hash values — which quietly defeats both the per-era press dedupe
+ * and the identity-minting cap for every IPv6 visitor. ISPs delegate at least
+ * a /64 per subscriber, so the prefix is the part that actually stays put.
+ */
+export function networkKey(rawIp: string): string {
+  const ip = normalizeIp(rawIp);
+  if (!ip.includes(':')) return ip; // IPv4
+
+  const [headRaw = '', tailRaw = ''] = ip.split('::');
+  const head = headRaw ? headRaw.split(':').filter(Boolean) : [];
+  const tail = tailRaw ? tailRaw.split(':').filter(Boolean) : [];
+
+  const groups = ip.includes('::')
+    ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill('0'), ...tail]
+    : head;
+
+  // Anything that doesn't parse as 8 groups is malformed; hash it whole rather
+  // than silently bucketing unrelated clients together.
+  if (groups.length !== 8) return ip;
+
+  return groups.slice(0, 4).map((g) => g.padStart(4, '0')).join(':') + '::/64';
 }
 
 /**
@@ -63,11 +93,11 @@ export function clientIp(req: IncomingMessage): string {
  * a router.
  */
 export function ipHash(req: IncomingMessage): string {
-  const ip = clientIp(req);
+  const key = networkKey(clientIp(req));
   const ua = (req.headers['user-agent'] ?? '').slice(0, 512);
   return crypto
     .createHash('sha256')
-    .update(`${ip}|${ua}|${config.ipSalt}`)
+    .update(`${key}|${ua}|${config.ipSalt}`)
     .digest('hex');
 }
 
