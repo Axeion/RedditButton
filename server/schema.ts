@@ -111,6 +111,11 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- When the site is empty the clock freezes here rather than churning through
+-- eras nobody is watching. expires_at stays frozen at its pre-pause value, so
+-- the remaining time is exactly (expires_at - paused_at) and survives restarts.
+ALTER TABLE eras ADD COLUMN IF NOT EXISTS paused_at timestamptz;
+
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_by text;
 

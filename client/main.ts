@@ -56,6 +56,13 @@ const state = {
   expiresAt: 0,
   eraId: 0,
   roundSeconds: 90,
+  paused: false,
+  /**
+   * While paused the server holds the deadline steady, but local interpolation
+   * would still tick it down between the once-a-second broadcasts and snap it
+   * back. Freeze an explicit value and render that instead.
+   */
+  pausedSeconds: 0,
   mod: null as ModInfo | null,
   chatSettings: { slowModeSeconds: 0, locked: false } as ChatSettingsDTO,
   boardScope: 'era' as 'era' | 'all',
@@ -91,9 +98,12 @@ function fmtSecs(n: number): string {
  * countdown stutter or jump backwards.
  */
 function frame(): void {
-  const left = state.expiresAt
+  const live = state.expiresAt
     ? Math.max(0, Math.min(state.roundSeconds, (state.expiresAt - clock.now()) / 1000))
     : state.roundSeconds;
+
+  // A paused clock must look stopped, not merely slow.
+  const left = state.paused ? state.pausedSeconds : live;
 
   els.time.textContent = left.toFixed(2);
 
@@ -102,10 +112,12 @@ function frame(): void {
   const band = bandFor(left);
   els.clock.style.color = band.hex;
 
-  const urgent = left < 10;
+  const urgent = left < 10 && !state.paused;
   els.clock.classList.toggle('is-urgent', urgent);
 
-  if (left <= 0) {
+  if (state.paused) {
+    els.clockSub.textContent = 'paused — the clock only runs when someone is watching';
+  } else if (left <= 0) {
     els.clockSub.textContent = 'flatlined';
   } else if (urgent) {
     els.clockSub.textContent = `${band.label.toLowerCase()} territory — someone press`;
@@ -114,7 +126,7 @@ function frame(): void {
   }
 
   // Heartbeat accelerates under fifteen seconds: 1100ms down to ~260ms.
-  if (left > 0 && left < 15) {
+  if (!state.paused && left > 0 && left < 15) {
     const t = 1 - left / 15;
     sound.heartbeat(1100 - t * 840, t);
   }
@@ -518,6 +530,8 @@ function handle(msg: ServerMessage): void {
       state.eraId = msg.eraId;
       state.roundSeconds = msg.roundSeconds;
       state.mod = msg.mod;
+      state.paused = msg.paused;
+      state.pausedSeconds = Math.max(0, (msg.expiresAt - msg.serverTime) / 1000);
       clock.sample(Date.now(), msg.serverTime);
       applyChatSettings(msg.chatSettings);
       renderPressButton();
@@ -532,12 +546,17 @@ function handle(msg: ServerMessage): void {
     case 'state':
       state.expiresAt = msg.expiresAt;
       state.eraId = msg.eraId;
+      state.paused = msg.paused;
+      if (msg.paused) {
+        state.pausedSeconds = Math.max(0, (msg.expiresAt - msg.serverTime) / 1000);
+      }
       els.watching.textContent = String(msg.watching);
       els.loaded.textContent = String(msg.loaded);
       break;
 
     case 'press': {
       state.expiresAt = msg.expiresAt;
+      state.paused = false;
 
       if (msg.mine) {
         state.hasPressed = true;

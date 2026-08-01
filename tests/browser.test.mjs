@@ -37,7 +37,9 @@ function check(name, pass, detail = '') {
 
 async function setSecondsLeft(seconds) {
   await pool.query(
-    `UPDATE eras SET expires_at = now() + ($1 || ' milliseconds')::interval WHERE ended_at IS NULL`,
+    `UPDATE eras SET expires_at = now() + ($1 || ' milliseconds')::interval,
+                     paused_at = NULL
+     WHERE ended_at IS NULL`,
     [String(Math.round(seconds * 1000))],
   );
   await sleep(2400); // let the server's DB resync pick it up

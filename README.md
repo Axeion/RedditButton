@@ -294,6 +294,53 @@ presses — and a sustained failure shows up in the log rather than silently.
 
 ---
 
+## When nobody is watching
+
+The clock **freezes** after 60 seconds with zero viewers, and resumes exactly
+where it stopped when someone arrives.
+
+Without this an unwatched site burns an era every 90 seconds forever: roughly
+960 era transitions a day, a Graveyard full of deaths nobody witnessed, and a
+"longest era survived" statistic that measures nothing but uptime. The first
+live deployment produced ~40 dead eras against 5 real presses before this
+existed.
+
+Remaining time is preserved exactly, which produces the best arrival in the
+game: leave at 4.2 seconds, and the next person to open the site lands on a
+4.2-second emergency.
+
+**The tradeoff, stated plainly:** with pausing on, the button can no longer die
+of pure neglect overnight — which is how the original actually ended. It can
+still die any time someone is watching and nobody presses, which is the only
+version of that death anyone is present to experience. Set
+`PAUSE_WHEN_EMPTY=false` to restore the original behaviour.
+
+A paused era older than `STALE_PAUSE_HOURS` (24 by default) is retired and
+replaced, so nobody comes back after a quiet week to a three-second crisis
+frozen since Tuesday. It's marked `stale` rather than `flatline` and kept out of
+the Graveyard — it never died and nobody failed to save it, so burying it would
+misrepresent what happened. Any presses it collected still count on the
+all-time board.
+
+### Cleanup
+
+Runs daily, and on demand via `POST /admin/cleanup`:
+
+| Pruned | After |
+|---|---|
+| Eras where nobody pressed and nobody spoke | 1 hour |
+| Stale-retired eras with no presses | 7 days |
+| Chat from buried eras | 30 days |
+| `abuse_events`, unused identities | 30 days |
+| Expired timeouts | 7 days past expiry |
+
+**Presses are never deleted.** They are the all-time leaderboard, they are what
+every share card points at, and they are the only permanent thing anyone earned
+here. `tests/idle.test.mjs` asserts the press count is unchanged across a
+cleanup run.
+
+---
+
 ## Analytics (optional, Umami)
 
 ```

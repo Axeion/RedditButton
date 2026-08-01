@@ -73,6 +73,16 @@ export const config = {
 
   roundSeconds: int('ROUND_SECONDS', 90),
 
+  /**
+   * Seconds of zero viewers before the clock freezes. A grace period matters:
+   * without one, a single reconnect would thrash pause/resume.
+   */
+  pauseAfterEmptySeconds: int('PAUSE_AFTER_EMPTY_SECONDS', 60),
+  /** A paused era older than this is retired rather than resumed. */
+  stalePauseHours: int('STALE_PAUSE_HOURS', 24),
+  /** Set false to keep the original behaviour: it can die of neglect. */
+  pauseWhenEmpty: (process.env.PAUSE_WHEN_EMPTY ?? 'true').toLowerCase() !== 'false',
+
   /** See .env.example — hard is the default and the one that stops farming. */
   dedupeMode: dedupeMode(),
   identityPerIpHour: int('IDENTITY_PER_IP_HOUR', 3),

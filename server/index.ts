@@ -14,6 +14,7 @@ import { attachHub, connectionCount } from './hub.ts';
 import { renderCard } from './card.ts';
 import { sharePage, graveyardPage, modLoginPage } from './pages.ts';
 import * as mods from './moderation.ts';
+import { scheduleCleanup, runCleanup, summarise } from './cleanup.ts';
 import { verifyTurnstile, turnstileEnabled, siteKey } from './turnstile.ts';
 import { umamiTag, umamiEnabled } from './analytics.ts';
 import fs from 'node:fs';
@@ -332,6 +333,13 @@ app.delete('/admin/mods/:username', async (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/admin/cleanup', async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const report = await runCleanup();
+  console.log(`[cleanup] manual run: ${summarise(report)}`);
+  res.json({ ok: true, report });
+});
+
 app.post('/admin/ban', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const { ipHash: hash, reason } = req.body as { ipHash?: string; reason?: string };
@@ -444,6 +452,7 @@ async function main(): Promise<void> {
   attachHub(server);
 
   setInterval(() => void mods.sweepSessions(), 3600_000).unref();
+  scheduleCleanup();
 
   if (!config.adminToken) {
     console.warn(

@@ -9,7 +9,17 @@ import type { User } from './identity.ts';
 export interface EraState {
   id: number;
   startedAt: number;
+  /**
+   * The live deadline. While paused this is recomputed every tick as
+   * (now + frozenRemainingMs), so clients always receive a meaningful deadline
+   * and simply watch it stop moving. The database keeps expires_at frozen at
+   * its pre-pause value, which is what makes the remaining time survive a
+   * restart.
+   */
   expiresAt: number;
+  pausedAt: number | null;
+  /** Milliseconds left on the clock when it froze. */
+  frozenRemainingMs: number;
 }
 
 export const gameEvents = new EventEmitter();
@@ -17,12 +27,33 @@ export const gameEvents = new EventEmitter();
 let current: EraState | null = null;
 let flatlining = false;
 
+/** Live viewer count, reported by the hub. Drives pause and resume. */
+let viewers = 0;
+/** When the last viewer left; null while anyone is watching. */
+let emptySince: number | null = Date.now();
+
+export function reportViewers(n: number): void {
+  viewers = n;
+  if (n > 0) emptySince = null;
+  else if (emptySince === null) emptySince = Date.now();
+}
+
+export function viewerCount(): number {
+  return viewers;
+}
+
 export function currentEra(): EraState {
   if (!current) throw new Error('Game not initialised');
   return current;
 }
 
+export function isPaused(): boolean {
+  return current?.pausedAt !== null && current !== null;
+}
+
 const roundMs = () => config.roundSeconds * 1000;
+const graceMs = () => config.pauseAfterEmptySeconds * 1000;
+const staleMs = () => config.stalePauseHours * 3600_000;
 
 // ---------------------------------------------------------------------------
 // Row mapping
@@ -53,18 +84,61 @@ const PRESS_SELECT = `
   SELECT p.id, p.era_id, u.name, p.seconds_left, p.band, p.pressed_at
   FROM presses p JOIN users u ON u.id = p.user_id`;
 
+interface EraRow {
+  id: number;
+  started_at: Date;
+  expires_at: Date;
+  paused_at: Date | null;
+}
+
+const ERA_SELECT =
+  'SELECT id, started_at, expires_at, paused_at FROM eras WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1';
+
+function toEraState(row: EraRow): EraState {
+  const expiresAt = row.expires_at.getTime();
+  if (row.paused_at) {
+    const pausedAt = row.paused_at.getTime();
+    // Clamped to a full round in both directions. Nothing in normal play can
+    // exceed it, but expires_at edited directly while paused would otherwise
+    // resume with more time than a round ever grants — an invariant worth
+    // enforcing here rather than trusting every future caller to respect.
+    const frozen = Math.min(roundMs(), Math.max(0, expiresAt - pausedAt));
+    return {
+      id: row.id,
+      startedAt: row.started_at.getTime(),
+      expiresAt: Date.now() + frozen,
+      pausedAt,
+      frozenRemainingMs: frozen,
+    };
+  }
+  return {
+    id: row.id,
+    startedAt: row.started_at.getTime(),
+    expiresAt,
+    pausedAt: null,
+    frozenRemainingMs: 0,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Era lifecycle
 // ---------------------------------------------------------------------------
 
+/**
+ * Open a new era.
+ *
+ * Starts paused when nobody is watching, so an empty site does not immediately
+ * begin burning through a fresh 90 seconds it will never be asked to defend.
+ */
 async function openEra(): Promise<EraState> {
-  const { rows } = await query<{ id: number; started_at: Date; expires_at: Date }>(
-    `INSERT INTO eras (expires_at) VALUES (now() + ($1 || ' milliseconds')::interval)
-     RETURNING id, started_at, expires_at`,
+  const startPaused = config.pauseWhenEmpty && viewers === 0;
+  const { rows } = await query<EraRow>(
+    `INSERT INTO eras (expires_at, paused_at)
+     VALUES (now() + ($1 || ' milliseconds')::interval, ${startPaused ? 'now()' : 'NULL'})
+     RETURNING id, started_at, expires_at, paused_at`,
     [String(roundMs())],
   );
-  const r = rows[0]!;
-  return { id: r.id, startedAt: r.started_at.getTime(), expiresAt: r.expires_at.getTime() };
+  return toEraState(rows[0]!);
 }
 
 /**
@@ -73,35 +147,54 @@ async function openEra(): Promise<EraState> {
  * one bug that would quietly ruin the game.
  */
 export async function initGame(): Promise<void> {
-  const { rows } = await query<{ id: number; started_at: Date; expires_at: Date }>(
-    'SELECT id, started_at, expires_at FROM eras WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1',
-  );
+  const { rows } = await query<EraRow>(ERA_SELECT);
   const row = rows[0];
 
   if (!row) {
     current = await openEra();
-    console.log(`[game] first era #${current.id} opened`);
+    console.log(`[game] first era #${current.id} opened${current.pausedAt ? ' (paused, no viewers)' : ''}`);
   } else {
-    current = {
-      id: row.id,
-      startedAt: row.started_at.getTime(),
-      expiresAt: row.expires_at.getTime(),
-    };
-    const left = current.expiresAt - Date.now();
-    if (left <= 0) {
-      // It ran out while the process was down. Honour the death.
-      console.log(`[game] era #${current.id} flatlined during downtime`);
-      await flatline();
+    current = toEraState(row);
+
+    if (current.pausedAt !== null) {
+      const pausedFor = Date.now() - current.pausedAt;
+      if (pausedFor > staleMs()) {
+        console.log(
+          `[game] era #${current.id} paused ${(pausedFor / 3600_000).toFixed(1)}h — retiring as stale`,
+        );
+        await retireStale();
+      } else {
+        console.log(
+          `[game] resumed era #${current.id} still paused, ` +
+            `${(current.frozenRemainingMs / 1000).toFixed(2)}s frozen on the clock`,
+        );
+      }
     } else {
-      console.log(`[game] resumed era #${current.id}, ${(left / 1000).toFixed(2)}s left`);
+      const left = current.expiresAt - Date.now();
+      if (left <= 0) {
+        // It ran out while the process was down. Honour the death.
+        console.log(`[game] era #${current.id} flatlined during downtime`);
+        await flatline();
+      } else {
+        console.log(`[game] resumed era #${current.id}, ${(left / 1000).toFixed(2)}s left`);
+      }
     }
   }
 
   // Fast tick against the in-memory deadline: flatline detection stays snappy
   // without hammering Postgres four times a second.
   setInterval(() => {
-    if (current && Date.now() >= current.expiresAt) void flatline();
+    if (!current) return;
+    if (current.pausedAt !== null) {
+      // Hold the deadline steady so connected clients see a stopped clock
+      // rather than a number running past zero.
+      current.expiresAt = Date.now() + current.frozenRemainingMs;
+      return;
+    }
+    if (Date.now() >= current.expiresAt) void flatline();
   }, 250).unref();
+
+  setInterval(() => void pauseTick(), 1000).unref();
 
   // Slow resync from the database, which is the actual source of truth. Memory
   // is a cache, and a cache that can never be corrected is just a second source
@@ -110,23 +203,29 @@ export async function initGame(): Promise<void> {
   setInterval(() => void resyncFromDb(), 2000).unref();
 }
 
-/** Pull the live era's deadline back from the database if memory has drifted. */
+/** Pull the live era back from the database if memory has drifted. */
 async function resyncFromDb(): Promise<void> {
   if (!current || flatlining) return;
   try {
-    const { rows } = await query<{ id: number; started_at: Date; expires_at: Date }>(
-      'SELECT id, started_at, expires_at FROM eras WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1',
-    );
+    const { rows } = await query<EraRow>(ERA_SELECT);
     const row = rows[0];
     if (!row) return;
 
-    const expiresAt = row.expires_at.getTime();
-    if (row.id !== current.id) {
-      current = { id: row.id, startedAt: row.started_at.getTime(), expiresAt };
+    const fresh = toEraState(row);
+    if (fresh.id !== current.id) {
+      current = fresh;
       return;
     }
-    if (Math.abs(expiresAt - current.expiresAt) > 250) {
-      current.expiresAt = expiresAt;
+    // While paused the deadline is derived, so only the frozen remainder is
+    // worth correcting; comparing derived deadlines would fight the tick.
+    if (fresh.pausedAt !== null) {
+      current.pausedAt = fresh.pausedAt;
+      current.frozenRemainingMs = fresh.frozenRemainingMs;
+      return;
+    }
+    current.pausedAt = null;
+    if (Math.abs(fresh.expiresAt - current.expiresAt) > 250) {
+      current.expiresAt = fresh.expiresAt;
     }
   } catch (err) {
     // A blip here is survivable: the fast tick keeps running off memory.
@@ -134,9 +233,132 @@ async function resyncFromDb(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pause / resume
+// ---------------------------------------------------------------------------
+
+/**
+ * Freeze and thaw the clock as the room empties and fills.
+ *
+ * Without this, an unwatched site burns an era every 90 seconds forever: ~960
+ * era transitions a day, a Graveyard full of deaths nobody witnessed, and a
+ * "longest era" statistic that measures nothing.
+ *
+ * The tradeoff is deliberate and worth stating: with pausing on, the button can
+ * no longer die of pure neglect overnight, which is how the original ended. It
+ * can still die whenever anyone is actually watching and nobody presses — which
+ * is the only version of that death anyone is present to experience.
+ * PAUSE_WHEN_EMPTY=false restores the original behaviour.
+ */
+async function pauseTick(): Promise<void> {
+  if (!current || flatlining || !config.pauseWhenEmpty) return;
+
+  try {
+    if (viewers > 0) {
+      if (current.pausedAt !== null) await resumeClock();
+      return;
+    }
+
+    if (current.pausedAt !== null) {
+      if (Date.now() - current.pausedAt > staleMs()) await retireStale();
+      return;
+    }
+
+    // Grace period: a single reconnect shouldn't thrash pause/resume.
+    if (emptySince !== null && Date.now() - emptySince >= graceMs()) {
+      await pauseClock();
+    }
+  } catch (err) {
+    console.error('[game] pause tick failed', err);
+  }
+}
+
+async function pauseClock(): Promise<void> {
+  if (!current) return;
+  const { rows } = await query<EraRow>(
+    `UPDATE eras SET paused_at = now()
+     WHERE id = $1 AND ended_at IS NULL AND paused_at IS NULL
+     RETURNING id, started_at, expires_at, paused_at`,
+    [current.id],
+  );
+  const row = rows[0];
+  if (!row) return;
+
+  current = toEraState(row);
+  console.log(
+    `[game] era #${current.id} paused with ` +
+      `${(current.frozenRemainingMs / 1000).toFixed(2)}s left — nobody watching`,
+  );
+  gameEvents.emit('pause', current);
+}
+
+async function resumeClock(): Promise<void> {
+  if (!current || current.pausedAt === null) return;
+
+  // Give back exactly what was on the clock: expires_at moves forward by the
+  // duration of the pause.
+  const { rows } = await query<EraRow>(
+    `UPDATE eras
+     SET expires_at = now() + LEAST(expires_at - paused_at, ($2 || ' milliseconds')::interval),
+         paused_at = NULL
+     WHERE id = $1 AND ended_at IS NULL AND paused_at IS NOT NULL
+     RETURNING id, started_at, expires_at, paused_at`,
+    [current.id, String(roundMs())],
+  );
+  const row = rows[0];
+  if (!row) return;
+
+  current = toEraState(row);
+  console.log(
+    `[game] era #${current.id} resumed with ` +
+      `${((current.expiresAt - Date.now()) / 1000).toFixed(2)}s left`,
+  );
+  gameEvents.emit('resume', current);
+}
+
+/**
+ * Retire an era that has been paused too long and open a fresh one.
+ *
+ * Marked 'stale' rather than 'flatline' and kept out of the Graveyard: it did
+ * not die, nobody failed to save it, and burying it would be a lie. Any presses
+ * it collected are untouched and still count on the all-time board.
+ */
+async function retireStale(): Promise<void> {
+  if (!current) return;
+  const staleId = current.id;
+
+  const next = await tx(async (c) => {
+    const { rows } = await c.query<{ id: number }>(
+      'SELECT id FROM eras WHERE id = $1 AND ended_at IS NULL FOR UPDATE',
+      [staleId],
+    );
+    if (!rows[0]) return null;
+
+    await c.query(
+      `UPDATE eras SET ended_at = paused_at, ended_reason = 'stale' WHERE id = $1`,
+      [staleId],
+    );
+    const { rows: created } = await c.query<EraRow>(
+      `INSERT INTO eras (expires_at, paused_at)
+       VALUES (now() + ($1 || ' milliseconds')::interval, now())
+       RETURNING id, started_at, expires_at, paused_at`,
+      [String(roundMs())],
+    );
+    return created[0]!;
+  });
+
+  if (!next) return;
+  current = toEraState(next);
+  console.log(`[game] era #${staleId} retired as stale; era #${current.id} open and paused`);
+  gameEvents.emit('stale', staleId, current);
+}
+
 /** End the current era, archive it, and open the next one. */
 async function flatline(): Promise<void> {
   if (flatlining || !current) return;
+  // A paused clock cannot run out. Belt and braces alongside the tick check.
+  if (current.pausedAt !== null) return;
+
   flatlining = true;
   const deadId = current.id;
 
@@ -144,33 +366,33 @@ async function flatline(): Promise<void> {
     const next = await tx(async (c) => {
       // Re-check under a row lock: a concurrent press may have saved it between
       // the tick firing and this transaction starting.
-      const { rows } = await c.query<{ expires_at: Date }>(
-        'SELECT expires_at FROM eras WHERE id = $1 AND ended_at IS NULL FOR UPDATE',
+      const { rows } = await c.query<{ expires_at: Date; paused_at: Date | null }>(
+        'SELECT expires_at, paused_at FROM eras WHERE id = $1 AND ended_at IS NULL FOR UPDATE',
         [deadId],
       );
       const row = rows[0];
       if (!row) return null;
+      if (row.paused_at) return null; // paused between tick and transaction
       if (row.expires_at.getTime() > Date.now()) return null; // saved in time
 
       await c.query(
         `UPDATE eras SET ended_at = expires_at, ended_reason = 'flatline' WHERE id = $1`,
         [deadId],
       );
-      const { rows: created } = await c.query<{ id: number; started_at: Date; expires_at: Date }>(
+      const { rows: created } = await c.query<EraRow>(
         `INSERT INTO eras (expires_at) VALUES (now() + ($1 || ' milliseconds')::interval)
-         RETURNING id, started_at, expires_at`,
+         RETURNING id, started_at, expires_at, paused_at`,
         [String(roundMs())],
       );
-      const e = created[0]!;
-      return { id: e.id, startedAt: e.started_at.getTime(), expiresAt: e.expires_at.getTime() };
+      return created[0]!;
     });
 
     if (!next) return; // saved at the last instant
 
     const summary = await eraSummary(deadId);
-    current = next;
-    console.log(`[game] era #${deadId} flatlined; era #${next.id} open`);
-    gameEvents.emit('flatline', summary, next);
+    current = toEraState(next);
+    console.log(`[game] era #${deadId} flatlined; era #${current.id} open`);
+    gameEvents.emit('flatline', summary, current);
   } catch (err) {
     console.error('[game] flatline failed', err);
   } finally {
@@ -367,9 +589,16 @@ export async function eraSummary(eraId: number): Promise<EraSummary> {
   };
 }
 
+/**
+ * Only eras that actually flatlined are buried. A stale-retired era was never
+ * defended and never lost — listing it as a death would be a lie, and it would
+ * bury the real ones under noise.
+ */
 export async function graveyard(limit = 50): Promise<EraSummary[]> {
   const { rows } = await query<{ id: number }>(
-    'SELECT id FROM eras WHERE ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT $1',
+    `SELECT id FROM eras
+     WHERE ended_at IS NOT NULL AND ended_reason = 'flatline'
+     ORDER BY ended_at DESC LIMIT $1`,
     [limit],
   );
   return Promise.all(rows.map((r) => eraSummary(r.id)));
@@ -379,7 +608,7 @@ export async function graveyard(limit = 50): Promise<EraSummary[]> {
 export async function longestEraMs(): Promise<number> {
   const { rows } = await query<{ ms: string | null }>(
     `SELECT max(EXTRACT(EPOCH FROM (ended_at - started_at)) * 1000) AS ms
-     FROM eras WHERE ended_at IS NOT NULL`,
+     FROM eras WHERE ended_at IS NOT NULL AND ended_reason = 'flatline'`,
   );
   return Number(rows[0]?.ms ?? 0);
 }
