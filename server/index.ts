@@ -15,6 +15,8 @@ import { renderCard } from './card.ts';
 import { sharePage, graveyardPage, modLoginPage } from './pages.ts';
 import * as mods from './moderation.ts';
 import { verifyTurnstile, turnstileEnabled, siteKey } from './turnstile.ts';
+import { umamiTag, umamiEnabled } from './analytics.ts';
+import fs from 'node:fs';
 import { clientIp } from './abuse.ts';
 import { query } from './db.ts';
 
@@ -357,8 +359,20 @@ app.post('/admin/unban', async (req, res) => {
 if (IS_PROD) {
   const clientDir = path.join(import.meta.dirname, 'client');
   app.use(express.static(clientDir, { maxAge: '1h', index: false }));
+
+  // Read once and inject the analytics tag, rather than sendFile-ing the raw
+  // build output. Keeps the website ID out of the repo and out of the bundle,
+  // and makes changing it a variable change instead of a rebuild.
+  const indexPath = path.join(clientDir, 'index.html');
+  let indexHtml = fs.readFileSync(indexPath, 'utf8');
+  if (umamiEnabled()) {
+    indexHtml = indexHtml.replace('</head>', `${umamiTag()}\n</head>`);
+    console.log('[analytics] umami enabled');
+  }
+
   app.get('/{*any}', (_req, res) => {
-    res.sendFile(path.join(clientDir, 'index.html'));
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(indexHtml);
   });
 }
 

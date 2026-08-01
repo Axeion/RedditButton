@@ -1,4 +1,5 @@
 import { bandById } from '@shared/bands.ts';
+import { umamiTag } from './analytics.ts';
 import type { PressDTO, EraSummary } from '@shared/protocol.ts';
 
 function esc(s: string): string {
@@ -53,7 +54,12 @@ const SHELL_CSS = `
   td.r { text-align: right; color: #6B7075; font-variant-numeric: tabular-nums; }
 `;
 
-function shell(title: string, head: string, body: string): string {
+/**
+ * `analytics` is opt-out per page: the moderator sign-in is deliberately not
+ * tracked. Measuring your own staff logging in is noise at best, and the page
+ * is already noindex.
+ */
+function shell(title: string, head: string, body: string, analytics = true): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -62,6 +68,7 @@ function shell(title: string, head: string, body: string): string {
 <title>${esc(title)}</title>
 <style>${SHELL_CSS}</style>
 ${head}
+${analytics ? umamiTag() : ''}
 </head>
 <body><div class="wrap">${body}</div></body>
 </html>`;
@@ -192,5 +199,5 @@ ${error ? `<p class="sub" style="color:#E03131">${esc(error)}</p>` : '<p class="
   <button class="cta" type="submit" style="border:none;cursor:pointer;width:100%">Sign in</button>
 </form>
 <p class="muted">Accounts are created by an admin. There is no self-signup.</p>`;
-  return shell('Deadman - moderator sign-in', head, body);
+  return shell('Deadman - moderator sign-in', head, body, false);
 }

@@ -1,6 +1,7 @@
 import './styles.css';
 import { ClockSync } from './clock.ts';
 import { sound } from './sound.ts';
+import { track, pressBucket } from './analytics.ts';
 import { BANDS, bandById, bandFor, type BandId } from '@shared/bands.ts';
 import type {
   ServerMessage, ClientMessage, PressDTO, ChatDTO, ModInfo, ChatSettingsDTO,
@@ -468,6 +469,7 @@ function openShareModal(press: PressDTO): void {
   copy.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(url);
+      track('share-copy', { band: band.id });
       copy.textContent = 'Copied';
       window.setTimeout(() => (copy.textContent = 'Copy link'), 1600);
     } catch {
@@ -482,6 +484,7 @@ function openShareModal(press: PressDTO): void {
   open.target = '_blank';
   open.rel = 'noopener';
   open.textContent = 'Open card';
+  open.addEventListener('click', () => track('share-open', { band: band.id }));
 
   actions.append(copy, open);
   els.modalBody.append(pill, h3, time, sub, img, actions);
@@ -507,6 +510,7 @@ function handle(msg: ServerMessage): void {
     case 'hello': {
       state.connected = true;
       state.spectator = msg.spectator;
+      if (msg.spectator) track('spectator-blocked');
       state.name = msg.name;
       state.hasPressed = msg.hasPressed;
       state.myPress = msg.myPress;
@@ -539,6 +543,14 @@ function handle(msg: ServerMessage): void {
         state.hasPressed = true;
         state.myPress = msg.press;
         state.pressInFlight = false;
+        // The one event worth everything else combined: did they press, and how
+        // close did they cut it. Bucketed, because raw seconds would be a
+        // near-unique value per press and unreadable in a breakdown.
+        track('press', {
+          band: msg.press.band,
+          time: pressBucket(msg.press.secondsLeft),
+          rank: msg.press.rank ?? 0,
+        });
         sound.confirm();
         renderPressButton();
         renderYou();
@@ -700,6 +712,7 @@ function solveTurnstile(siteKey: string): Promise<string | null> {
 
     els.modalBody.append(h3, sub, host);
     els.modal.hidden = false;
+    track('turnstile-shown');
 
     let settled = false;
     const done = (token: string | null) => {
@@ -799,6 +812,7 @@ els.chatForm.addEventListener('submit', (e) => {
 
 els.mute.addEventListener('click', () => {
   const on = sound.toggle();
+  track('sound-toggle', { on });
   els.muteIcon.textContent = on ? '🔊' : '🔇';
   els.mute.setAttribute('aria-pressed', on ? 'true' : 'false');
   els.mute.title = on ? 'Sound is on' : 'Sound is off';

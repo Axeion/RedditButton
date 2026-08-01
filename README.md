@@ -294,6 +294,48 @@ presses — and a sustained failure shows up in the log rather than silently.
 
 ---
 
+## Analytics (optional, Umami)
+
+```
+UMAMI_SCRIPT_URL=https://umami.example.com/script.js
+UMAMI_WEBSITE_ID=your-website-id
+UMAMI_DOMAINS=deadman.lol          # optional: keeps previews out of the numbers
+```
+
+Injected **server-side, in production only** — so the website ID stays out of
+the repo and the JS bundle, dev traffic never pollutes the numbers, and changing
+it is a variable change rather than a rebuild. The moderator sign-in page is
+deliberately excluded; measuring your own staff logging in is noise.
+
+**The default snippet alone would tell you almost nothing here.** This is one
+page that never navigates, so a pageview tracker records "someone arrived" and
+then goes quiet for the entire session. Everything interesting is a custom
+event:
+
+| Event | Payload | What it answers |
+|---|---|---|
+| `press` | band, time bucket, rank | The core metric: do people press, and how close do they cut it? |
+| `share-copy` / `share-open` | band | Does the share loop actually spread? |
+| `spectator-blocked` | — | Is the identity cap turning real people away? |
+| `turnstile-shown` | — | Is the challenge costing you signups? |
+| `sound-toggle` | on/off | Does anyone want the audio? |
+
+Press times are **bucketed** (`0-1s`, `1-5s`, `5-10s`, …) rather than sent raw.
+Raw seconds are near-unique per press, which would turn the Umami breakdown into
+thousands of one-row entries instead of a distribution you can read.
+
+Only user-initiated actions are tracked. Nothing fires per tick or per flatline —
+a flatline event would multiply by every connected client and bury a self-hosted
+instance for no insight.
+
+**A blocked tracker cannot break the game.** Ad blockers stop Umami for a good
+slice of real traffic, so every call goes through a wrapper that no-ops when
+`window.umami` is absent, and the tag is `defer` so it never sits in front of the
+countdown. `tests/analytics.test.mjs` asserts this directly: with the script
+aborted, the clock still runs, the button still works, and no page errors fire.
+
+---
+
 ## How it's built
 
 ```
