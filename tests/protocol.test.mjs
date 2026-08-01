@@ -74,7 +74,11 @@ function connect(id, label) {
 /** Move the live era's deadline so the edges are testable in seconds. */
 async function setSecondsLeft(seconds) {
   await pool.query(
-    `UPDATE eras SET expires_at = now() + ($1 || ' milliseconds')::interval
+    // paused_at must be cleared too: while paused the remaining time is
+    // derived as (expires_at - paused_at), so setting only expires_at would
+    // inflate the clock on resume.
+    `UPDATE eras SET expires_at = now() + ($1 || ' milliseconds')::interval,
+                     paused_at = NULL
      WHERE ended_at IS NULL`,
     [String(Math.round(seconds * 1000))],
   );

@@ -70,9 +70,19 @@ export type ServerMessage =
       /** Set when this connection is authenticated as a moderator. */
       mod: ModInfo | null;
       chatSettings: ChatSettingsDTO;
+      paused: boolean;
     }
   | { type: 'pong'; t: number; serverTime: number }
-  | { type: 'state'; serverTime: number; expiresAt: number; eraId: number; watching: number; loaded: number }
+  | {
+      type: 'state';
+      serverTime: number;
+      expiresAt: number;
+      eraId: number;
+      watching: number;
+      loaded: number;
+      /** True while the clock is frozen because nobody is watching. */
+      paused: boolean;
+    }
   | { type: 'press'; press: PressDTO; expiresAt: number; closeCall: boolean; mine: boolean }
   | { type: 'chat'; message: ChatDTO }
   | { type: 'chatBackfill'; messages: ChatDTO[] }

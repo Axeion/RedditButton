@@ -25,7 +25,8 @@
     "test:network": "tsx tests/network.test.ts",
     "test:filter": "tsx tests/filter.test.ts",
     "test:moderation": "node tests/moderation.test.mjs",
-    "test:analytics": "node tests/analytics.test.mjs"
+    "test:analytics": "node tests/analytics.test.mjs",
+    "test:idle": "node tests/idle.test.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.65",

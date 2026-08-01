@@ -330,6 +330,7 @@ export function attachHub(server: Server): void {
       alive: true,
     };
     conns.add(c);
+    game.reportViewers(conns.size);
 
     ws.on('pong', () => {
       c.alive = true;
@@ -349,6 +350,7 @@ export function attachHub(server: Server): void {
       roundSeconds: config.roundSeconds,
       mod: mod ? { username: mod.username, role: mod.role } : null,
       chatSettings: settingsDTO(),
+      paused: era.pausedAt !== null,
     });
     send(c, { type: 'chatBackfill', messages: chat.backfill() });
     void pushLeaderboards(c);
@@ -393,10 +395,12 @@ export function attachHub(server: Server): void {
 
     ws.on('close', () => {
       conns.delete(c);
+      game.reportViewers(conns.size);
       release();
     });
     ws.on('error', () => {
       conns.delete(c);
+      game.reportViewers(conns.size);
       release();
     });
   });
@@ -407,6 +411,7 @@ export function attachHub(server: Server): void {
       if (!c.alive) {
         c.ws.terminate();
         conns.delete(c);
+        game.reportViewers(conns.size);
         continue;
       }
       c.alive = false;
@@ -425,6 +430,7 @@ export function attachHub(server: Server): void {
       eraId: era.id,
       watching: conns.size,
       loaded: loadedCount(),
+      paused: era.pausedAt !== null,
     });
   }, 1000).unref();
 
