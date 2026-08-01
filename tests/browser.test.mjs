@@ -8,9 +8,18 @@
  *
  * Screenshots land in test-results/.
  */
-import { chromium } from 'playwright';
 import { mkdirSync, existsSync } from 'node:fs';
 import pg from 'pg';
+
+// Playwright is deliberately NOT a devDependency: it drags ~150MB of browsers
+// into every production build for a test that only runs by hand.
+let chromium;
+try {
+  ({ chromium } = await import('playwright'));
+} catch {
+  console.error('This test needs Playwright:\n\n  npm i --no-save playwright\n');
+  process.exit(1);
+}
 
 const BASE = process.env.TEST_BASE ?? 'http://localhost:3000';
 const DB = process.env.DATABASE_URL ?? 'postgres://postgres@127.0.0.1:5433/deadman';

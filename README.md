@@ -78,9 +78,13 @@ NODE_ENV=production node --env-file=.env dist/server.js   # everything on :3000
 ### Tests
 
 ```bash
-npm test                # typecheck + band boundaries + full protocol suite
-npm run test:browser    # two real browsers, screenshots into test-results/
+npm test                                  # typecheck + bands + protocol suite
+npm i --no-save playwright                # only needed for the browser test
+npm run test:browser                      # two real browsers -> test-results/
 ```
+
+Playwright is deliberately not a devDependency — it pulls ~150MB of browsers
+into every production build for a test that only runs by hand.
 
 `test:protocol` drives real WebSocket clients through pressing, double-press
 rejection, network dedupe, chat limits, flatline, and every anti-abuse control.
@@ -98,17 +102,33 @@ provider plus a separate database. Railway runs this as one container with
 Postgres attached.
 
 1. Create a Railway project from this repo.
-2. Add the **Postgres** plugin — `DATABASE_URL` is injected automatically.
-3. Set these variables:
+2. `+ New` → `Database` → `Add PostgreSQL`.
+3. On your **app** service → `Variables`, set:
 
    | Variable | Value |
    |---|---|
+   | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` — a reference, see below |
    | `COOKIE_SECRET` | `openssl rand -hex 32` |
    | `IP_SALT` | `openssl rand -hex 32` |
    | `ADMIN_TOKEN` | `openssl rand -hex 32` (optional; gates `/admin/*`) |
    | `NODE_ENV` | `production` |
+   | `PUBLIC_ORIGIN` | `https://your-domain` (optional) |
+
+   Adding the database creates `DATABASE_URL` on the *database* service, not on
+   your app — the reference in the table is what bridges them. Match the service
+   name if yours isn't called `Postgres`.
 
 4. Deploy. `railway.json` handles the build, start command, and health check.
+
+### Two things that will bite you if you change the build config
+
+- **`NODE_ENV=production` makes `npm ci` skip devDependencies** — which is where
+  `vite`, `esbuild`, and `typescript` live. The install phase then succeeds and
+  the build dies on `vite: not found`. The repo's `.npmrc` sets `include=dev` to
+  prevent that; don't delete it.
+- **Nixpacks already runs its own `npm ci` install phase.** Putting another
+  `npm ci` in `buildCommand` fails with `EBUSY: resource busy or locked,
+  rmdir '/app/node_modules/.cache'`. `buildCommand` must be build-only.
 
 The app refuses to boot in production without a real `COOKIE_SECRET` — a
 random-per-boot secret would silently log every player out on each deploy.
