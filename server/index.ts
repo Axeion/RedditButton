@@ -225,6 +225,49 @@ if (IS_PROD) {
 const server = http.createServer(app);
 
 /**
+ * Bind the listening socket.
+ *
+ * Host matters more than it looks. Railway's proxy reaches containers over
+ * IPv6, and binding '0.0.0.0' is IPv4-ONLY — the process comes up healthy,
+ * logs that it is listening, and is still unreachable from the edge, which
+ * surfaces as a 502 that looks nothing like a bind problem.
+ *
+ * '::' with ipv6Only unset is dual-stack: it accepts IPv6 and IPv4 both. That
+ * is also Node's default when no host is given. We fall back to 0.0.0.0 for
+ * the rare host with IPv6 disabled entirely.
+ */
+function listen(): Promise<void> {
+  const preferred = process.env.BIND_HOST ?? '::';
+
+  const tryHost = (host: string) =>
+    new Promise<void>((resolve, reject) => {
+      const onError = (err: NodeJS.ErrnoException) => {
+        server.removeListener('listening', onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        server.removeListener('error', onError);
+        console.log(
+          `[deadman] listening on [${host}]:${config.port} ` +
+            `(${IS_PROD ? 'production' : 'development'})`,
+        );
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(config.port, host);
+    });
+
+  return tryHost(preferred).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL') {
+      console.warn(`[deadman] ${preferred} unavailable (${err.code}); falling back to 0.0.0.0`);
+      return tryHost('0.0.0.0');
+    }
+    throw err;
+  });
+}
+
+/**
  * Bind the port BEFORE touching the database.
  *
  * If initialisation runs first and the database isn't reachable, the process
@@ -233,16 +276,7 @@ const server = http.createServer(app);
  * wrong, and a slow database becomes a short delay rather than a crash loop.
  */
 async function main(): Promise<void> {
-  server.listen(config.port, '0.0.0.0', () => {
-    console.log(
-      `[deadman] listening on 0.0.0.0:${config.port} (${IS_PROD ? 'production' : 'development'})`,
-    );
-  });
-
-  server.on('error', (err) => {
-    console.error('[deadman] server error', err);
-    process.exit(1);
-  });
+  await listen();
 
   console.log('[deadman] connecting to postgres…');
   await waitForDb();
