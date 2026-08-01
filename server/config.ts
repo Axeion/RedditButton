@@ -33,6 +33,18 @@ function secret(name: string): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
+/**
+ * Open Graph image URLs must be absolute, so a PUBLIC_ORIGIN of "deadman.lol"
+ * (no scheme) would silently break every link preview. Normalise rather than
+ * demand it be typed perfectly into a dashboard.
+ */
+function normalizeOrigin(raw: string | undefined): string {
+  const v = (raw ?? '').trim().replace(/\/+$/, '');
+  if (!v) return '';
+  if (/^https?:\/\//i.test(v)) return v;
+  return `https://${v}`;
+}
+
 export type DedupeMode = 'hard' | 'soft' | 'off';
 
 function dedupeMode(): DedupeMode {
@@ -46,7 +58,7 @@ export const config = {
   cookieSecret: secret('COOKIE_SECRET'),
   ipSalt: secret('IP_SALT'),
   adminToken: process.env.ADMIN_TOKEN ?? '',
-  publicOrigin: process.env.PUBLIC_ORIGIN ?? '',
+  publicOrigin: normalizeOrigin(process.env.PUBLIC_ORIGIN),
 
   roundSeconds: int('ROUND_SECONDS', 90),
 
