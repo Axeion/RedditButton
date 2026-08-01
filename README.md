@@ -244,10 +244,26 @@ sessions immediately.
 There is **no self-signup**. Accounts exist only if an admin creates one:
 
 ```bash
-curl -X POST https://deadman.lol/admin/mods \
-  -H "x-admin-token: $ADMIN_TOKEN" -H 'content-type: application/json' \
+# Paste the token literally. $ADMIN_TOKEN is a variable in YOUR shell, and it is
+# almost certainly empty there — the value lives in your host's environment, not
+# on the machine you're running curl from. An empty header returns 403.
+# -i shows the status code, so a failure can't look like a success.
+curl -i -X POST https://deadman.lol/admin/mods \
+  -H "x-admin-token: PASTE_THE_TOKEN_HERE" \
+  -H 'content-type: application/json' \
   -d '{"username":"you","password":"a-long-passphrase","role":"admin"}'
 ```
+
+Expected: `HTTP/2 200` and `{"ok":true,"mod":{...}}`. Anything else:
+
+| Response | Meaning |
+|---|---|
+| `503 admin_disabled` | `ADMIN_TOKEN` isn't set on the host. Set it and redeploy. |
+| `403 forbidden` | Token wrong or empty — check you pasted it, not `$ADMIN_TOKEN`. |
+| `400` + message | Password under 12 characters, or username outside 3–32. |
+
+The deploy log prints `[deadman] N moderator accounts` at boot, so you can
+confirm the account exists without guessing.
 
 **The client being a mod means nothing.** Hidden UI is not a permission check —
 every mod action is re-authorised server-side against the session cookie, and

@@ -91,6 +91,14 @@ export async function listMods(): Promise<
   return rows as never;
 }
 
+/** Surfaced at boot so "sign-in fails" has an obvious first thing to check. */
+export async function countMods(): Promise<number> {
+  const { rows } = await query<{ n: string }>(
+    'SELECT count(*) AS n FROM mods WHERE disabled_at IS NULL',
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
 export async function disableMod(username: string): Promise<void> {
   await query('UPDATE mods SET disabled_at = now() WHERE username = $1', [username.toLowerCase()]);
   await query(

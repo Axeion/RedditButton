@@ -263,12 +263,19 @@ app.get('/api/mod/actions', async (req, res) => {
 
 function requireAdmin(req: express.Request, res: express.Response): boolean {
   if (!config.adminToken) {
-    res.status(404).end();
+    // An empty 404 here reads as "route doesn't exist" and, worse, curl prints
+    // nothing at all — which looks identical to success. Say what's wrong.
+    res.status(503).json({
+      error: 'admin_disabled',
+      message:
+        'Admin routes are disabled because ADMIN_TOKEN is not set. ' +
+        'Set it in your host environment and redeploy.',
+    });
     return false;
   }
   const given = req.get('x-admin-token') ?? '';
   if (given !== config.adminToken) {
-    res.status(403).json({ error: 'forbidden' });
+    res.status(403).json({ error: 'forbidden', message: 'Wrong or missing x-admin-token.' });
     return false;
   }
   return true;
@@ -423,6 +430,15 @@ async function main(): Promise<void> {
   attachHub(server);
 
   setInterval(() => void mods.sweepSessions(), 3600_000).unref();
+
+  if (!config.adminToken) {
+    console.warn(
+      '[deadman] ADMIN_TOKEN is not set — /admin/* is disabled, so mod accounts ' +
+        'cannot be created. Set ADMIN_TOKEN and redeploy.',
+    );
+  }
+  const modCount = await mods.countMods();
+  console.log(`[deadman] ${modCount} moderator account${modCount === 1 ? '' : 's'}`);
 
   setReady();
   console.log('[deadman] ready');
