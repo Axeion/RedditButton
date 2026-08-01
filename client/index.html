@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Deadman — it stays alive while someone still presses</title>
+    <meta
+      name="description"
+      content="A 90-second clock everyone shares. One press each, ever. Press late and you rank higher — but if nobody presses, it dies."
+    />
+    <meta property="og:title" content="Deadman" />
+    <meta property="og:description" content="It stays alive while someone still presses. One press each, ever." />
+    <meta name="theme-color" content="#E03131" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23E03131'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="flash" aria-hidden="true"></div>
+
+    <header class="top">
+      <div class="brand">
+        <a class="mark" href="/">DEADMAN</a>
+        <span class="tag">It stays alive while someone still presses.</span>
+      </div>
+      <div class="top-right">
+        <div class="pressure" id="pressure">
+          <span id="watching">—</span> watching
+          <span class="dot">·</span>
+          <span id="loaded">—</span> loaded
+        </div>
+        <button id="mute" class="icon-btn" type="button" aria-pressed="false" title="Sound is off">
+          <span id="mute-icon">🔇</span>
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <section class="stage">
+        <div class="clock" id="clock">
+          <span id="time">90.00</span><span class="unit">s</span>
+        </div>
+        <div class="clock-sub" id="clock-sub">until it flatlines</div>
+
+        <button id="press" class="press" type="button">
+          <span class="press-label" id="press-label">PRESS</span>
+        </button>
+
+        <div class="you" id="you">connecting…</div>
+        <div class="hint" id="hint">One press. Ever. The later you press, the higher you rank.</div>
+      </section>
+
+      <section class="panel gauge-panel">
+        <div class="panel-head">
+          <h2>The Gauge</h2>
+          <span class="muted" id="gauge-total">0 presses</span>
+        </div>
+        <div class="gauge" id="gauge" role="img" aria-label="Distribution of flair colours"></div>
+        <div class="gauge-legend" id="gauge-legend"></div>
+      </section>
+
+      <div class="cols">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Leaderboard</h2>
+            <div class="tabs">
+              <button class="tab is-on" data-scope="era" type="button">This era</button>
+              <button class="tab" data-scope="all" type="button">All time</button>
+            </div>
+          </div>
+          <ol class="board" id="board"></ol>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Close calls</h2>
+            <span class="muted">under 10s</span>
+          </div>
+          <ul class="calls" id="calls"></ul>
+        </section>
+      </div>
+
+      <section class="panel chat-panel">
+        <div class="panel-head">
+          <h2>Chat</h2>
+          <span class="muted"><a href="/graveyard">Graveyard →</a></span>
+        </div>
+        <div class="chat" id="chat"></div>
+        <form class="chat-form" id="chat-form">
+          <input
+            id="chat-input"
+            type="text"
+            maxlength="300"
+            autocomplete="off"
+            placeholder="Say something…"
+          />
+          <button type="submit">Send</button>
+        </form>
+        <div class="chat-error" id="chat-error"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <div id="modal" class="modal" hidden>
+      <div class="modal-card">
+        <button class="modal-x" id="modal-x" type="button" aria-label="Close">×</button>
+        <div class="modal-body" id="modal-body"></div>
+      </div>
+    </div>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
