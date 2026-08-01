@@ -265,11 +265,20 @@ check('three malformed frames drop the connection', cCode === 1008, `close code 
 
 // --- Audit trail ------------------------------------------------------------
 
-const { rows: kinds } = await pool.query(
-  `SELECT DISTINCT kind FROM abuse_events WHERE created_at > now() - interval '10 minutes'`,
-);
-const seen = kinds.map((k) => k.kind);
-for (const kind of ['press_dup_network', 'chat_duplicate', 'chat_rate', 'ws_malformed']) {
+// logAbuse is deliberately fire-and-forget — an audit write must never be able
+// to fail a player action — so the INSERT can land just after the socket
+// closes. Poll rather than racing it with a single query.
+const WANT = ['press_dup_network', 'chat_duplicate', 'chat_rate', 'ws_malformed'];
+let seen = [];
+for (let i = 0; i < 20; i++) {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT kind FROM abuse_events WHERE created_at > now() - interval '10 minutes'`,
+  );
+  seen = rows.map((k) => k.kind);
+  if (WANT.every((k) => seen.includes(k))) break;
+  await sleep(150);
+}
+for (const kind of WANT) {
   check(`abuse_events records ${kind}`, seen.includes(kind));
 }
 
